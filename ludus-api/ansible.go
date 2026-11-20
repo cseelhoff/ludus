@@ -837,10 +837,15 @@ func computeTargetNodes(e *core.RequestEvent, rangeID string) (string, map[strin
 	}
 
 	// Determine the default target node
-	// Priority: Range target_node > Auto-select
+	// Priority: Range target_node > Single pinned/allowed node > Auto-select > Server proxmox_node
 	var defaultTargetNode string
-	if config.Defaults != nil {
+	if config.Defaults != nil && IsProxmoxNodeAllowed(config.Defaults.TargetNode) {
 		defaultTargetNode = config.Defaults.TargetNode
+	}
+	if defaultTargetNode == "" {
+		if allowed := AllowedProxmoxNodes(); len(allowed) == 1 {
+			defaultTargetNode = allowed[0]
+		}
 	}
 	if defaultTargetNode == "" {
 		// Try auto-selection based on resource usage
@@ -853,19 +858,23 @@ func computeTargetNodes(e *core.RequestEvent, rangeID string) (string, map[strin
 		}
 	}
 
-	// If still empty, use the configured node
+	// If still empty, use the configured node (or first allowed node)
 	if defaultTargetNode == "" {
-		defaultTargetNode = ServerConfiguration.ProxmoxNode
+		if allowed := AllowedProxmoxNodes(); len(allowed) > 0 && !slices.Contains(allowed, ServerConfiguration.ProxmoxNode) {
+			defaultTargetNode = allowed[0]
+		} else {
+			defaultTargetNode = ServerConfiguration.ProxmoxNode
+		}
 	}
 
 	// Build per-VM target node map
-	// Priority: Existing VM's node >VM target_node > Range default
+	// Priority: Existing VM's node > Allowed VM target_node > Range default
 	for _, vm := range config.Ludus {
 		node, err := getNodeForVMByName(e, vm.VMName)
 		if err == nil && node != "" {
 			logger.Debug(fmt.Sprintf("VM %s is already running on node %s", vm.VMName, node))
 			vmTargetNodes[vm.VMName] = node
-		} else if vm.TargetNode != "" {
+		} else if vm.TargetNode != "" && IsProxmoxNodeAllowed(vm.TargetNode) {
 			logger.Debug(fmt.Sprintf("VM %s target node is %s", vm.VMName, vm.TargetNode))
 			vmTargetNodes[vm.VMName] = vm.TargetNode
 		} else {
@@ -874,7 +883,7 @@ func computeTargetNodes(e *core.RequestEvent, rangeID string) (string, map[strin
 		}
 	}
 
-	// Router: always set target node when we have a router VM name. Priority: existing node > router.target_node > range default
+	// Router: always set target node when we have a router VM name. Priority: existing node > allowed router.target_node > range default
 	usersRange, err := GetRange(e)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Failed to get range for target node computation: %v", err))
@@ -885,7 +894,7 @@ func computeTargetNodes(e *core.RequestEvent, rangeID string) (string, map[strin
 		if node, err := getNodeForVMByName(e, routerVMName); err == nil && node != "" {
 			logger.Debug(fmt.Sprintf("Router %s is running on node %s", routerVMName, node))
 			vmTargetNodes[routerVMName] = node
-		} else if config.Router != nil && config.Router.TargetNode != "" {
+		} else if config.Router != nil && config.Router.TargetNode != "" && IsProxmoxNodeAllowed(config.Router.TargetNode) {
 			logger.Debug(fmt.Sprintf("Router %s target node is %s", routerVMName, config.Router.TargetNode))
 			vmTargetNodes[routerVMName] = config.Router.TargetNode
 		} else {

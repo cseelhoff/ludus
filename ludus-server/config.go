@@ -155,12 +155,14 @@ func loadConfig() {
 	if err != nil {
 		log.Fatalf("Error opening config: %v", err)
 	}
+	config.ProxmoxInvalidCert = true
 	config.SSORequireExistingUser = true
 	config.CreateDefaultRange = true
 	err = yaml.Unmarshal(data, &config)
 	if err != nil {
 		log.Fatalf("Error unmarshalling config: %v", err)
 	}
+	config.ApplyRemoteProxmoxDefaults()
 	if err := config.ApplyPortDefaultsAndValidate(); err != nil {
 		log.Fatalf("%v", err)
 	}

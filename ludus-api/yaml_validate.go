@@ -128,11 +128,15 @@ func loadYaml(schema string) ([]byte, error) {
 	return yamlBytes, nil
 }
 
-// validateTargetNode checks if a target_node exists in the cluster
-// Returns nil if targetNode is empty (will be auto-selected) or if it exists
+// validateTargetNode checks if a target_node is permitted and exists in the cluster.
+// Returns nil if targetNode is empty (will be auto-selected) or if it is valid.
 func validateTargetNode(e *core.RequestEvent, targetNode string) error {
 	if targetNode == "" {
 		return nil // Will be auto-selected
+	}
+
+	if !IsProxmoxNodeAllowed(targetNode) {
+		return fmt.Errorf("target_node '%s' is not permitted by server configuration (allowed nodes: %s)", targetNode, strings.Join(AllowedProxmoxNodes(), ", "))
 	}
 
 	// Check if we have cached the nodes for this request

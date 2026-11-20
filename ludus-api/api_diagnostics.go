@@ -27,16 +27,25 @@ func GetDiagnostics(e *core.RequestEvent) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Get CPU information
-	cpuModel, cpuCores, err := getCPUInfo()
-	if err != nil {
-		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Error getting CPU info: %v", err))
-	}
-
 	// Get Proxmox client (using root client for diagnostics)
 	proxmoxClient, err := GetRootGoProxmoxClient()
 	if err != nil {
 		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Error creating Proxmox client: %v", err))
+	}
+
+	// Get CPU information (prefer outer Proxmox node CPU info in RemoteProxmox mode)
+	var cpuModel string
+	var cpuCores int
+	if ServerConfiguration.RemoteProxmox {
+		cpuModel, cpuCores, err = getRemoteNodeCPUInfo(ctx, proxmoxClient)
+		if err != nil {
+			cpuModel, cpuCores, err = getCPUInfo()
+		}
+	} else {
+		cpuModel, cpuCores, err = getCPUInfo()
+	}
+	if err != nil {
+		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Error getting CPU info: %v", err))
 	}
 
 	// Get storage pools
@@ -45,7 +54,7 @@ func GetDiagnostics(e *core.RequestEvent) error {
 		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Error getting storage pools: %v", err))
 	}
 
-	// Get pveperf results
+	// Get pveperf results (not applicable when running inside a remote controller VM)
 	pveperf, err := getPveperf()
 	if err != nil {
 		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Error getting pveperf: %v", err))
@@ -145,14 +154,74 @@ type StoragePoolInfo struct {
 	FreePercentage float64 `json:"free_percentage"` // in percentage
 }
 
-// getStoragePools retrieves storage pool information using pvesm status
+// getRemoteNodeCPUInfo queries the outer Proxmox node's CPU model and thread count via HTTPS API.
+func getRemoteNodeCPUInfo(ctx context.Context, client *goproxmox.Client) (string, int, error) {
+	nodeName := strings.TrimSpace(ServerConfiguration.ProxmoxNode)
+	if nodeName == "" {
+		return "", 0, fmt.Errorf("proxmox_node is not configured")
+	}
+	node, err := client.Node(ctx, nodeName)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to query Proxmox node %q: %w", nodeName, err)
+	}
+	if node.CPUInfo.Model == "" || node.CPUInfo.CPUs <= 0 {
+		return "", 0, fmt.Errorf("Proxmox node %q returned empty CPU info", nodeName)
+	}
+	return node.CPUInfo.Model, node.CPUInfo.CPUs, nil
+}
+
+// getStoragePools retrieves storage pool information via Proxmox HTTPS API in RemoteProxmox mode
+// (or when pvesm is unavailable), falling back to local `pvesm status` on hypervisor installs.
 func getStoragePools(ctx context.Context, client *goproxmox.Client) ([]StoragePoolInfo, error) {
-	// Get all storage pools from pvesm status
+	if ServerConfiguration.RemoteProxmox {
+		return getStoragePoolsFromAPI(ctx, client)
+	}
+	if _, lookErr := exec.LookPath("pvesm"); lookErr != nil {
+		return getStoragePoolsFromAPI(ctx, client)
+	}
 	pools, err := getAllStoragePoolsFromPvesm()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get storage pools from pvesm: %w", err)
 	}
 
+	return pools, nil
+}
+
+func getStoragePoolsFromAPI(ctx context.Context, client *goproxmox.Client) ([]StoragePoolInfo, error) {
+	nodeName := strings.TrimSpace(ServerConfiguration.ProxmoxNode)
+	if nodeName == "" {
+		return nil, fmt.Errorf("proxmox_node is not configured")
+	}
+	node, err := client.Node(ctx, nodeName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Proxmox node %q: %w", nodeName, err)
+	}
+	storages, err := node.Storages(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query storages on node %q: %w", nodeName, err)
+	}
+	const bytesPerGiB = 1024.0 * 1024.0 * 1024.0
+	pools := make([]StoragePoolInfo, 0, len(storages))
+	for _, st := range storages {
+		if st.Active == 0 {
+			continue
+		}
+		sizeGB := math.Round((float64(st.Total)/bytesPerGiB)*100) / 100
+		usedGB := math.Round((float64(st.Used)/bytesPerGiB)*100) / 100
+		freeGB := math.Round((float64(st.Avail)/bytesPerGiB)*100) / 100
+		var freePct float64
+		if st.Total > 0 {
+			freePct = math.Round((float64(st.Avail)/float64(st.Total))*10000) / 100
+		}
+		pools = append(pools, StoragePoolInfo{
+			Name:           st.Name,
+			Type:           st.Type,
+			SizeGB:         sizeGB,
+			UsedGB:         usedGB,
+			FreeGB:         freeGB,
+			FreePercentage: freePct,
+		})
+	}
 	return pools, nil
 }
 
@@ -255,6 +324,22 @@ type PveperfInfo struct {
 // FSYNCS/SECOND:     1322.63
 // DNS EXT:           17.29 ms
 func getPveperf() (*PveperfInfo, error) {
+	if ServerConfiguration.RemoteProxmox {
+		return &PveperfInfo{
+			HdSize:          "N/A (remote_proxmox VM mode)",
+			BufferedReads:   "N/A",
+			AverageSeekTime: "N/A",
+			DNSExt:          "N/A",
+		}, nil
+	}
+	if _, err := exec.LookPath("pveperf"); err != nil {
+		return &PveperfInfo{
+			HdSize:          "N/A (pveperf unavailable)",
+			BufferedReads:   "N/A",
+			AverageSeekTime: "N/A",
+			DNSExt:          "N/A",
+		}, nil
+	}
 	cmd := exec.Command("pveperf")
 	output, err := cmd.Output()
 	if err != nil {

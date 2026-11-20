@@ -3,6 +3,9 @@ package ludusapi
 import (
 	"fmt"
 	"log"
+	"net/url"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +27,7 @@ type Configuration struct {
 	ProxmoxNode               string        `mapstructure:"proxmox_node" yaml:"proxmox_node"`
 	ProxmoxInterface          string        `mapstructure:"proxmox_interface" yaml:"proxmox_interface"`
 	ProxmoxInvalidCert        bool          `mapstructure:"proxmox_invalid_cert" yaml:"proxmox_invalid_cert"`
+	ProxmoxTLSVerify          *bool         `mapstructure:"proxmox_tls_verify" yaml:"proxmox_tls_verify,omitempty"`
 	ProxmoxURL                string        `mapstructure:"proxmox_url" yaml:"proxmox_url"`
 	ProxmoxHostname           string        `mapstructure:"proxmox_hostname" yaml:"proxmox_hostname"`
 	ProxmoxLocalIP            string        `mapstructure:"proxmox_local_ip" yaml:"proxmox_local_ip"`
@@ -53,6 +57,15 @@ type Configuration struct {
 	ClusterMode  bool   `mapstructure:"cluster_mode" yaml:"cluster_mode"`     // Auto-detected via API during startup, can be overridden
 	SDNZone      string `mapstructure:"sdn_zone" yaml:"sdn_zone"`             // The SDN zone name for Ludus networking (default: "ludus")
 	VXLANTagBase int    `mapstructure:"vxlan_tag_base" yaml:"vxlan_tag_base"` // Base VXLAN tag (VNI) added to range number (default: 0)
+	// Remote Proxmox VM mode settings (run ludus-server inside a non-nested VM targeting an external Proxmox host/cluster)
+	RemoteProxmox            bool     `mapstructure:"remote_proxmox" yaml:"remote_proxmox"`
+	ProxmoxPinToNode         bool     `mapstructure:"proxmox_pin_to_node" yaml:"proxmox_pin_to_node"`
+	ProxmoxAllowedNodes      []string `mapstructure:"proxmox_allowed_nodes" yaml:"proxmox_allowed_nodes,omitempty"`
+	ProxmoxRealm             string   `mapstructure:"proxmox_realm" yaml:"proxmox_realm"`
+	ProxmoxAdminUser         string   `mapstructure:"proxmox_admin_user" yaml:"proxmox_admin_user"`
+	ProxmoxAdminPasswordFile string   `mapstructure:"proxmox_admin_password_file" yaml:"proxmox_admin_password_file"`
+	ProxmoxRootTokenID       string   `mapstructure:"proxmox_root_token_id" yaml:"proxmox_root_token_id"`
+	ProxmoxRootTokenFile     string   `mapstructure:"proxmox_root_token_file" yaml:"proxmox_root_token_file"`
 	// Quota defaults - applied to users who don't have explicit quotas or group defaults
 	// 0 means unlimited
 	DefaultQuotaRAM    int `mapstructure:"default_quota_ram" yaml:"default_quota_ram"`
@@ -97,6 +110,9 @@ func (s *Server) ParseConfig() {
 	// Do not set a default for cluster_mode to force viper to leave it unset unless provided,
 	// so we can detect if user has explicitly set it or not and fallback to API if unset.
 	// (See IsClusterMode in sdn.go for logic)
+	viper.SetDefault("remote_proxmox", false)
+	viper.SetDefault("proxmox_pin_to_node", false)
+	viper.SetDefault("proxmox_admin_user", "root@pam")
 	viper.SetDefault("sdn_zone", "ludus") // Default SDN zone name
 	viper.SetDefault("vxlan_tag_base", 0) // Base VXLAN tag added to range number
 	viper.SetDefault("default_quota_ram", 0)
@@ -114,13 +130,10 @@ func (s *Server) ParseConfig() {
 	// readers during ParseConfig wouldn't have a safe time-window without this.
 	ConfigMu.Lock()
 	err := viper.Unmarshal(&ServerConfiguration)
+	ServerConfiguration.ApplyRemoteProxmoxDefaults()
 	ConfigMu.Unlock()
 	if err != nil {
 		log.Fatalf("Unable to decode into struct, %v", err)
-	}
-	// By default hostname is the node name, but not always
-	if ServerConfiguration.ProxmoxHostname == "" {
-		ServerConfiguration.ProxmoxHostname = ServerConfiguration.ProxmoxNode
 	}
 	// Make sure the database encryption key is 32 characters long
 	if len(ServerConfiguration.DatabaseEncryptionKey) != 32 {
@@ -148,9 +161,146 @@ func (s *Server) ParseConfig() {
 		if err := viper.Unmarshal(&ServerConfiguration); err != nil {
 			log.Printf("Error reloading config: %v", err)
 		} else {
+			ServerConfiguration.ApplyRemoteProxmoxDefaults()
 			log.Println("Configuration reloaded from file")
 		}
 	})
+}
+
+// EffectiveProxmoxRealm returns the configured Proxmox user realm ("pve" by default when
+// RemoteProxmox is enabled, otherwise "pam").
+func (c *Configuration) EffectiveProxmoxRealm() string {
+	if realm := strings.TrimSpace(c.ProxmoxRealm); realm != "" {
+		return realm
+	}
+	if c.RemoteProxmox {
+		return "pve"
+	}
+	return "pam"
+}
+
+// EffectiveProxmoxAdminUser returns the Proxmox admin user ID (including @realm) used for
+// ticket-authenticated user/password/bootstrap operations.
+func (c *Configuration) EffectiveProxmoxAdminUser() string {
+	admin := strings.TrimSpace(c.ProxmoxAdminUser)
+	if admin == "" {
+		return "root@pam"
+	}
+	if !strings.Contains(admin, "@") {
+		return admin + "@pam"
+	}
+	return admin
+}
+
+// EffectiveLudusNATInterface returns the NAT transit interface name. When RemoteProxmox
+// is enabled and the legacy host default ("vmbr1000") or empty string was left in place,
+// it normalizes to "ludusnat" to match the Proxmox SDN NAT VNet.
+func (c *Configuration) EffectiveLudusNATInterface() string {
+	iface := strings.TrimSpace(c.LudusNATInterface)
+	if c.RemoteProxmox && (iface == "" || iface == "vmbr1000") {
+		return NATVNetName
+	}
+	if iface == "" {
+		return "vmbr1000"
+	}
+	return iface
+}
+
+// ResolveProxmoxHostname derives the reachable Proxmox API hostname/IP for Ansible modules
+// (PROXMOX_HOSTNAME -> api_host). When ProxmoxHostname is unset and ProxmoxURL points to a
+// non-loopback host (or RemoteProxmox is enabled), the host component of ProxmoxURL is used
+// so Ansible does not depend on /etc/hosts resolution of short node names.
+func (c *Configuration) ResolveProxmoxHostname() string {
+	if h := strings.TrimSpace(c.ProxmoxHostname); h != "" {
+		return h
+	}
+	if rawURL := strings.TrimSpace(c.ProxmoxURL); rawURL != "" {
+		if parsed, err := url.Parse(rawURL); err == nil {
+			if host := parsed.Hostname(); host != "" {
+				if c.RemoteProxmox || (host != "127.0.0.1" && host != "localhost" && host != "::1") {
+					return host
+				}
+			}
+		}
+	}
+	return c.ProxmoxNode
+}
+
+// ApplyRemoteProxmoxDefaults normalizes derived realm, hostname, admin user, SDN zone,
+// Proxmox URL base, TLS verification alias, and NAT interface defaults on Configuration.
+func (c *Configuration) ApplyRemoteProxmoxDefaults() {
+	if trimmedURL := strings.TrimSpace(c.ProxmoxURL); trimmedURL != "" {
+		trimmedURL = strings.TrimRight(trimmedURL, "/")
+		trimmedURL = strings.TrimSuffix(trimmedURL, "/api2/json")
+		c.ProxmoxURL = strings.TrimRight(trimmedURL, "/")
+	}
+	if c.ProxmoxTLSVerify != nil {
+		c.ProxmoxInvalidCert = !(*c.ProxmoxTLSVerify)
+	}
+	c.ProxmoxRealm = c.EffectiveProxmoxRealm()
+	c.ProxmoxAdminUser = c.EffectiveProxmoxAdminUser()
+	c.LudusNATInterface = c.EffectiveLudusNATInterface()
+	c.ProxmoxHostname = c.ResolveProxmoxHostname()
+	if strings.TrimSpace(c.SDNZone) == "" {
+		c.SDNZone = "ludus"
+	}
+}
+
+// EffectiveAllowedProxmoxNodes returns the explicit allowlist of Proxmox cluster nodes
+// permitted to host range VMs, or nil if all online cluster nodes are permitted.
+// When ProxmoxPinToNode is true, placement is strictly pinned to ProxmoxNode even when
+// Proxmox SDN (e.g., VXLAN) is active across a multi-node cluster.
+func (c *Configuration) EffectiveAllowedProxmoxNodes() []string {
+	if c.ProxmoxPinToNode {
+		if node := strings.TrimSpace(c.ProxmoxNode); node != "" {
+			return []string{node}
+		}
+	}
+	if len(c.ProxmoxAllowedNodes) == 0 {
+		return nil
+	}
+	var allowed []string
+	for _, raw := range c.ProxmoxAllowedNodes {
+		node := strings.TrimSpace(raw)
+		if node != "" && !slices.Contains(allowed, node) {
+			allowed = append(allowed, node)
+		}
+	}
+	return allowed
+}
+
+// IsProxmoxNodeAllowed reports whether node is permitted under EffectiveAllowedProxmoxNodes.
+func (c *Configuration) IsProxmoxNodeAllowed(node string) bool {
+	target := strings.TrimSpace(node)
+	if target == "" {
+		return false
+	}
+	allowed := c.EffectiveAllowedProxmoxNodes()
+	if len(allowed) == 0 {
+		return true
+	}
+	return slices.Contains(allowed, target)
+}
+
+// AllowedProxmoxNodes returns the active node allowlist under ConfigMu.
+func AllowedProxmoxNodes() []string {
+	ConfigMu.RLock()
+	defer ConfigMu.RUnlock()
+	return ServerConfiguration.EffectiveAllowedProxmoxNodes()
+}
+
+// IsProxmoxNodeAllowed reports whether node is allowed under the active ServerConfiguration.
+func IsProxmoxNodeAllowed(node string) bool {
+	ConfigMu.RLock()
+	defer ConfigMu.RUnlock()
+	return ServerConfiguration.IsProxmoxNodeAllowed(node)
+}
+
+// ConfiguredProxmoxRealm returns the active Proxmox realm under ConfigMu.
+func ConfiguredProxmoxRealm() string {
+	ConfigMu.RLock()
+	defer ConfigMu.RUnlock()
+	return ServerConfiguration.EffectiveProxmoxRealm()
 }
 
 // ApplyPortDefaultsAndValidate backfills DefaultPort / DefaultAdminPort for

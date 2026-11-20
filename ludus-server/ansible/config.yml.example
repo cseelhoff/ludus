@@ -11,3 +11,21 @@ create_default_range: true        # Create a default range for each new user, in
 # boot_disk: /dev/sda             # Optional: override the auto-detected boot disk used for grub-pc recovery (e.g. /dev/nvme0n1 on EC2/NVMe hosts)
 # register_default_source: true   # Optional: set false to skip auto-registering the Bad Sector Labs source on startup
 # sync_sources_on_startup: true   # Optional: set false to skip re-syncing registered sources on each startup
+
+# --- Remote Proxmox VM Mode (run Ludus inside a non-nested Debian 12/13 VM targeting an outer Proxmox VE 8/9 host/cluster) ---
+# remote_proxmox: true
+# proxmox_url: "https://10.0.20.12:8006"
+# proxmox_node: "pve-prod-02"                        # Target outer Proxmox node name
+# proxmox_pin_to_node: true                          # Optional: pin all range VMs to proxmox_node even on multi-node SDN clusters
+# proxmox_allowed_nodes: ["pve-prod-02"]             # Optional: restrict cluster placement/validation to an explicit subset of nodes
+# proxmox_hostname: "10.0.20.12"                     # Optional: auto-derived from proxmox_url host if omitted
+# proxmox_invalid_cert: true                         # Skip TLS verify for self-signed Proxmox certs (or set proxmox_tls_verify: true for CA certs)
+# proxmox_realm: "pve"                               # Uses Proxmox built-in @pve realm (zero Linux PAM accounts on hypervisor)
+# proxmox_admin_user: "root@pam"                     # Or dedicated @pve admin user with Administrator on /
+# proxmox_admin_password_file: "/etc/ludus/proxmox-admin-pass" # chmod 0600 root:root secret file inside this VM
+# sdn_zone: "ludus"                                  # Auto-creates 'simple' zone on 1-node Proxmox; uses 'vxlan'/'evpn' on clusters
+# ludus_nat_interface: "ludusnat"                    # Proxmox SDN NAT VNet + local bridge inside Ludus VM
+# ludus_nat_guest_interface: "ens19"                 # Optional: guest NIC attached to Proxmox 'ludusnat' VNet (auto-detected if omitted)
+# proxmox_vm_storage_pool: "local-zfs"               # Outer Proxmox VM/template datastore
+# proxmox_vm_storage_format: "raw"                   # "raw" for ZFS/LVM-thin/Ceph, "qcow2" for dir/NFS
+# proxmox_iso_storage_pool: "local"                  # Outer Proxmox ISO datastore

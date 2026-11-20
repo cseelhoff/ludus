@@ -106,6 +106,7 @@ source "proxmox-iso" "debian13" {
   ]
   boot_key_interval = "100ms"
   http_directory    = "./http"
+  http_interface    = "${var.ludus_nat_interface}"
 
   boot_iso {
     type              = "ide"

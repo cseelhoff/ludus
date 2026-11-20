@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
+	ludusapi "ludusapi"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -140,7 +142,13 @@ func checkPackerPluginVersions() error {
 				Run("PACKER_PLUGIN_PATH="+ludusInstallPath+"/resources/packer/plugins packer plugins install github.com/hashicorp/ansible v"+minVersion, false, true)
 			} else if pluginName == "packer-plugin-proxmox" {
 				// Check that Proxmox version is > 9.1 otherwise stay on packer plugin version 1.2.3 since Proxmox < 9.1 can only do raw format TPM drives
-				proxmoxVersion, err := RunWithOutput("pveversion | cut -d '/' -f 2")
+				var proxmoxVersion string
+				var err error
+				if config.RemoteProxmox {
+					proxmoxVersion, err = ludusapi.GetRemoteProxmoxVersion(context.Background(), &config)
+				} else {
+					proxmoxVersion, err = RunWithOutput("pveversion | cut -d '/' -f 2")
+				}
 				if err != nil {
 					return fmt.Errorf("error checking proxmox version: %v", err)
 				}

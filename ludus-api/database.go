@@ -101,12 +101,20 @@ func createRootUserInDatabase() {
 		logger.Error(fmt.Sprintf("Error finding users collection: %v", err))
 		os.Exit(2)
 	}
+	adminPrincipal := ServerConfiguration.EffectiveProxmoxAdminUser()
+	adminParts := strings.SplitN(adminPrincipal, "@", 2)
+	adminUsername := adminParts[0]
+	adminRealm := "pam"
+	if len(adminParts) == 2 && adminParts[1] != "" {
+		adminRealm = adminParts[1]
+	}
+
 	userRecord := core.NewRecord(userCollection)
 	user := &models.User{}
 	user.SetProxyRecord(userRecord)
 	user.SetName("root")
-	user.SetProxmoxUsername("root")
-	user.SetProxmoxRealm("pam")
+	user.SetProxmoxUsername(adminUsername)
+	user.SetProxmoxRealm(adminRealm)
 	user.SetUserId("ROOT")
 	user.SetUserNumber(1)
 	user.SetIsAdmin(true)
@@ -125,7 +133,7 @@ func createRootUserInDatabase() {
 		logger.Error(fmt.Sprintf("Error chowning root API key: %v", err))
 
 	}
-	tokenID, tokenSecret, err := createRootAPITokenWithShell()
+	tokenID, tokenSecret, err := createRootAPIToken()
 	if err != nil {
 		log.Fatal(err.Error())
 	}
@@ -220,7 +228,7 @@ func createInitialAdminFromFile(initialAdminPath string) error {
 	user.SetPassword(cfg.Password)
 	user.SetIsAdmin(true)
 	user.SetProxmoxUsername(proxmoxUsername)
-	user.SetProxmoxRealm("pam")
+	user.SetProxmoxRealm(ConfiguredProxmoxRealm())
 	encryptedPassword, err := EncryptStringForDatabase(cfg.Password)
 	if err != nil {
 		return fmt.Errorf("encrypting password: %w", err)
@@ -232,7 +240,7 @@ func createInitialAdminFromFile(initialAdminPath string) error {
 		defer func() {
 			if wasError {
 				removeUserFromHostSystem(user.ProxmoxUsername())
-				removeUserFromProxmox(user.ProxmoxUsername(), "pam")
+				removeUserFromProxmox(user.ProxmoxUsername(), user.ProxmoxRealm())
 				removePool(user.UserId())
 				defaultRangeRecord, findErr := txApp.FindFirstRecordByData("ranges", "rangeID", user.DefaultRangeId())
 				if findErr == nil && defaultRangeRecord != nil {
@@ -260,12 +268,29 @@ func createInitialAdminFromFile(initialAdminPath string) error {
 			"proxmox_public_ip":      ServerConfiguration.ProxmoxPublicIP,
 			"user_is_admin":          true,
 			"proxmox_password":       cfg.Password,
+			"proxmox_realm":          user.ProxmoxRealm(),
+			"remote_proxmox":         ServerConfiguration.RemoteProxmox,
 			"user_has_default_range": user.DefaultRangeId() != "",
 		}
 		output, err := RunAddUserPlaybookStandalone(extraVars)
 		if err != nil {
 			wasError = true
 			return fmt.Errorf("running add-user playbook: %w (output: %s)", err, output)
+		}
+
+		if ServerConfiguration.RemoteProxmox || user.ProxmoxRealm() != "pam" {
+			if err := ensureProxmoxUserAndACLsViaAPI(
+				&ServerConfiguration,
+				user.ProxmoxUsername(),
+				user.ProxmoxRealm(),
+				cfg.Password,
+				user.UserId(),
+				true,
+				user.DefaultRangeId() != "",
+			); err != nil {
+				wasError = true
+				return fmt.Errorf("provisioning initial admin Proxmox user via API: %w", err)
+			}
 		}
 
 		apiKey := GenerateAPIKey(user.UserId())

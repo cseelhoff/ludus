@@ -10,6 +10,7 @@ import (
 	"log"
 	"ludusapi/models"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"slices"
@@ -48,25 +49,23 @@ func GetProxmoxClientForUserUsingToken(e *core.RequestEvent) (*proxmox.Client, e
 	return proxmoxClient, nil
 }
 
-func setProxmoxSystemPassword(username string, realm string, password string) error {
-	// You can't set passwords using API tokens...
-	// https://pve.proxmox.com/pve-docs/api-viewer/#/access/password
-	// "This API endpoint is not available for API tokens."
+func setProxmoxSystemPassword(username string, realm string, password string, oldPassword ...string) error {
+	var prevPw string
+	if len(oldPassword) > 0 {
+		prevPw = oldPassword[0]
+	}
 
-	// proxmoxClient, err := GetRootGoProxmoxClient()
-	// if err != nil {
-	// 	return errors.New("unable to create proxmox client: " + err.Error())
-	// }
-	// err = proxmoxClient.Password(context.TODO(), username+"@"+realm, password)
-	// if err != nil {
-	// 	return errors.New("unable to set proxmox system password: " + err.Error())
-	// }
-	// return nil
+	// In RemoteProxmox VM mode or for non-PAM realms (such as Proxmox's built-in @pve realm),
+	// update the password via PUT /api2/json/access/password using a ticket + CSRF token.
+	if ServerConfiguration.RemoteProxmox || realm != "pam" {
+		return setProxmoxPasswordViaAPI(&ServerConfiguration, username, realm, password, prevPw)
+	}
 
-	// So we use the shell command instead
-
-	if realm != "pam" {
-		return errors.New("only PAM realm is supported for now")
+	// On local PAM installs where proxmox_admin_password_file is not configured, fall back to pveum passwd.
+	if ServerConfiguration.ProxmoxAdminPasswordFile != "" {
+		if err := setProxmoxPasswordViaAPI(&ServerConfiguration, username, realm, password, prevPw); err == nil {
+			return nil
+		}
 	}
 
 	// Make sure the username and password values are escaped
@@ -146,6 +145,9 @@ func GetGoProxmoxClientForUserUsingToken(e *core.RequestEvent) (*goproxmox.Clien
 }
 
 func GetRootGoProxmoxClient() (*goproxmox.Client, error) {
+	if app == nil {
+		return nil, errors.New("PocketBase app is not initialized")
+	}
 
 	rawCachedClient := app.Store().Get("proxmoxClient_root")
 	cachedClient, ok := rawCachedClient.(*goproxmox.Client)
@@ -190,6 +192,13 @@ func GetRootGoProxmoxClient() (*goproxmox.Client, error) {
 }
 
 func createProxmoxAPITokenForUserWithoutContext(username string, userRealm string, proxmoxPassword string) (string, string, error) {
+	if userRealm == "" {
+		userRealm = ConfiguredProxmoxRealm()
+	}
+	if ServerConfiguration.RemoteProxmox || userRealm != "pam" {
+		return createProxmoxUserAPITokenViaAPI(&ServerConfiguration, username, userRealm, proxmoxPassword)
+	}
+
 	proxmoxCredentials := &goproxmox.Credentials{
 		Username: username + "@" + userRealm,
 		Password: proxmoxPassword,
@@ -218,8 +227,11 @@ func createProxmoxAPITokenForUserWithoutContext(username string, userRealm strin
 }
 
 func createProxmoxAPITokenForUserWithClient(proxmoxClient *goproxmox.Client, username string, userRealm string) (string, string, error) {
+	if userRealm == "" {
+		userRealm = ConfiguredProxmoxRealm()
+	}
 	// Get the user object from go-proxmox
-	goProxmoxUserObject, err := proxmoxClient.User(context.Background(), username+"@pam")
+	goProxmoxUserObject, err := proxmoxClient.User(context.Background(), username+"@"+userRealm)
 	if err != nil {
 		log.Printf("Failed to retrieve created user %s@%s: %v", username, userRealm, err)
 		return "", "", errors.New("failed to retrieve created user")
@@ -236,10 +248,14 @@ func createProxmoxAPITokenForUserWithClient(proxmoxClient *goproxmox.Client, use
 		if strings.Contains(err.Error(), "already exists") {
 			// Remove the token and try again
 			logger.Debug(fmt.Sprintf("API token already exists for user '%s', removing it and recreating", username))
-			shellEscapedUsername := shellescape.Quote(username + "@" + userRealm)
-			_, err = exec.Command("/usr/sbin/pveum", "user", "token", "del", shellEscapedUsername, "ludus-token").CombinedOutput()
-			if err != nil {
-				return "", "", errors.New("unable to remove existing API token: " + err.Error())
+			if delErr := deleteProxmoxUserTokenViaAPI(context.Background(), &ServerConfiguration, username, userRealm, "ludus-token"); delErr != nil {
+				if ServerConfiguration.RemoteProxmox || userRealm != "pam" {
+					return "", "", errors.New("unable to remove existing API token via Proxmox API: " + delErr.Error())
+				}
+				shellEscapedUsername := shellescape.Quote(username + "@" + userRealm)
+				if _, shellErr := exec.Command("/usr/sbin/pveum", "user", "token", "del", shellEscapedUsername, "ludus-token").CombinedOutput(); shellErr != nil {
+					return "", "", errors.New("unable to remove existing API token: " + shellErr.Error())
+				}
 			}
 			apiToken, err = goProxmoxUserObject.NewAPIToken(context.Background(), token)
 			if err != nil {
@@ -251,6 +267,17 @@ func createProxmoxAPITokenForUserWithClient(proxmoxClient *goproxmox.Client, use
 	}
 	logger.Debug(fmt.Sprintf("Created API token '%s' for user '%s'\n", apiToken.FullTokenID, username))
 	return apiToken.FullTokenID, apiToken.Value, nil
+}
+
+func createRootAPIToken() (string, string, error) {
+	if ServerConfiguration.RemoteProxmox ||
+		strings.TrimSpace(ServerConfiguration.ProxmoxRootTokenID) != "" ||
+		strings.TrimSpace(ServerConfiguration.ProxmoxAdminPasswordFile) != "" ||
+		os.Getenv("LUDUS_PROXMOX_ADMIN_PASSWORD") != "" ||
+		os.Getenv("LUDUS_PROXMOX_ROOT_TOKEN_ID") != "" {
+		return createRootAPITokenViaAPI(&ServerConfiguration)
+	}
+	return createRootAPITokenWithShell()
 }
 
 func createRootAPITokenWithShell() (string, string, error) {

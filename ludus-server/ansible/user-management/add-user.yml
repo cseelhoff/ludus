@@ -46,6 +46,11 @@
         mode: '0600'
       when: user_has_default_range | default(create_default_range | default(true)) | bool
 
+    - name: Ensure group "pveusers" exists on the Ludus host
+      ansible.builtin.group:
+        name: pveusers
+        state: present
+
     - name: Add the user to the host
       ansible.builtin.user:
         name: "{{ username }}"
@@ -168,6 +173,9 @@
           - "-group"
           - ludus_users
       no_log: true
+      when:
+        - not (remote_proxmox | default(false) | bool)
+        - (proxmox_realm | default('pam')) == 'pam'
 
     - name: Set the acls for the user on their own pool
       ansible.builtin.command:
@@ -181,7 +189,10 @@
           - PVEAdmin
           - "-role"
           - PVESDNAdmin
-      when: user_has_default_range | default(create_default_range | default(true)) | bool
+      when:
+        - not (remote_proxmox | default(false) | bool)
+        - (proxmox_realm | default('pam')) == 'pam'
+        - user_has_default_range | default(create_default_range | default(true)) | bool
 
     - name: Set the acls users pool for admins
       ansible.builtin.command:
@@ -195,7 +206,10 @@
           - PVEAdmin
           - "-role"
           - PVESDNAdmin
-      when: user_has_default_range | default(create_default_range | default(true)) | bool
+      when:
+        - not (remote_proxmox | default(false) | bool)
+        - (proxmox_realm | default('pam')) == 'pam'
+        - user_has_default_range | default(create_default_range | default(true)) | bool
 
     - name: Set acls for local "/storage/local"
       ansible.builtin.command:
@@ -207,6 +221,9 @@
           - "{{ username }}@pam"
           - "-role"
           - PVEDatastoreAdmin
+      when:
+        - not (remote_proxmox | default(false) | bool)
+        - (proxmox_realm | default('pam')) == 'pam'
 
     - name: Add user to ludus_admins
       ansible.builtin.command:
@@ -218,4 +235,7 @@
           - "--groups"
           - ludus_admins
           - "--append"
-      when: user_is_admin is defined and user_is_admin
+      when:
+        - not (remote_proxmox | default(false) | bool)
+        - (proxmox_realm | default('pam')) == 'pam'
+        - user_is_admin is defined and user_is_admin

@@ -1,14 +1,21 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
+	ludusapi "ludusapi"
 	"os"
 	"strings"
 )
 
 // This function is called when the server is upgraded and ensures that permissions are correct when upgrading
 func migratePermissions() error {
+	if config.RemoteProxmox {
+		log.Println("Migrating Proxmox roles, pools, groups, SDN, and ACLs over HTTPS API (remote_proxmox mode)...")
+		return ludusapi.BootstrapRemoteProxmox(context.Background(), &config)
+	}
+
 	// Get hostname for path
 	hostname, err := os.Hostname()
 	if err != nil {

@@ -17,11 +17,13 @@ var (
 	autoGenerateConfig bool
 	noAnsibleUpdate    bool
 	debugFlag          bool
+	remoteProxmoxFlag  bool
 )
 
 func init() {
 	flag.BoolVar(&updateFlag, "update", false, "update the ludus install with this binary and embedded files and restart the ludus services")
 	flag.BoolVar(&noPromptFlag, "no-prompt", false, "run the installer without prompting for confirmation")
+	flag.BoolVar(&remoteProxmoxFlag, "remote-proxmox", false, "run Ludus inside a non-nested VM targeting a remote Proxmox VE 8/9 host or cluster via HTTPS API")
 	flag.BoolVar(&versionFlag, "v", false, "print the version of this ludus server")
 	flag.BoolVar(&versionFlag, "version", false, "print the version of this ludus server")
 	flag.BoolVar(&helpFlag, "h", false, "display help information")

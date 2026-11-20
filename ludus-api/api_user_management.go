@@ -46,11 +46,27 @@ func provisionNewUser(txApp core.App, user *models.User, plaintextPassword strin
 		"proxmox_public_ip":      ServerConfiguration.ProxmoxPublicIP,
 		"user_is_admin":          user.IsAdmin(),
 		"proxmox_password":       plaintextPassword,
+		"proxmox_realm":          user.ProxmoxRealm(),
+		"remote_proxmox":         ServerConfiguration.RemoteProxmox,
 		"user_has_default_range": user.DefaultRangeId() != "",
 	}
 	output, err := RunAddUserPlaybookStandalone(extraVars)
 	if err != nil {
 		return "", fmt.Errorf("running add-user playbook: %w (output: %s)", err, output)
+	}
+
+	if ServerConfiguration.RemoteProxmox || user.ProxmoxRealm() != "pam" {
+		if err := ensureProxmoxUserAndACLsViaAPI(
+			&ServerConfiguration,
+			user.ProxmoxUsername(),
+			user.ProxmoxRealm(),
+			plaintextPassword,
+			user.UserId(),
+			user.IsAdmin(),
+			user.DefaultRangeId() != "",
+		); err != nil {
+			return "", fmt.Errorf("provisioning Proxmox user via API: %w", err)
+		}
 	}
 
 	apiKey := GenerateAPIKey(user.UserId())
@@ -156,7 +172,7 @@ func AddUser(e *core.RequestEvent) error {
 	user.SetIsAdmin(addUserJSON.IsAdmin)
 	// Convert to lower-case, and replace spaces with "-"
 	user.SetProxmoxUsername(strings.ReplaceAll(strings.ToLower(addUserJSON.Name), " ", "-"))
-	user.SetProxmoxRealm("pam") // For now, always use PAM for user authentication
+	user.SetProxmoxRealm(ConfiguredProxmoxRealm())
 	encryptedPassword, err := EncryptStringForDatabase(addUserJSON.Password)
 	if err != nil {
 		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Error encrypting Proxmox password: %v", err))
@@ -171,9 +187,9 @@ func AddUser(e *core.RequestEvent) error {
 		return JSONError(e, http.StatusBadRequest, "User with that name already exists")
 	}
 
-	// Check if the username already exists on the host system
+	// Check if the username already exists on the local system (both PAM installs and local Ludus VM workspace accounts)
 	if userExistsOnHostSystem(user.ProxmoxUsername()) {
-		return JSONError(e, http.StatusBadRequest, "User with that name already exists on the host system. Ludus uses the PAM for user authentication, so you must use a unique username for each Ludus user.")
+		return JSONError(e, http.StatusBadRequest, "User with that name already exists on the local Ludus host system; choose a unique username.")
 	}
 
 	if poolExists(user.UserId()) {
@@ -187,7 +203,7 @@ func AddUser(e *core.RequestEvent) error {
 		defer func() {
 			if wasError {
 				removeUserFromHostSystem(user.ProxmoxUsername())
-				removeUserFromProxmox(user.ProxmoxUsername(), "pam")
+				removeUserFromProxmox(user.ProxmoxUsername(), user.ProxmoxRealm())
 				removePool(user.UserId())
 				defaultRangeRecord, err := txApp.FindFirstRecordByData("ranges", "rangeID", user.DefaultRangeId())
 				if err == nil {
@@ -329,7 +345,7 @@ func ProvisionOAuth2User(e *core.RequestEvent) error {
 	user.SetPassword(req.Password)
 	user.SetIsAdmin(req.IsAdmin)
 	user.SetProxmoxUsername(req.ProxmoxUsername)
-	user.SetProxmoxRealm("pam")
+	user.SetProxmoxRealm(ConfiguredProxmoxRealm())
 	encryptedPassword, err := EncryptStringForDatabase(req.Password)
 	if err != nil {
 		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Error encrypting password: %v", err))
@@ -341,7 +357,7 @@ func ProvisionOAuth2User(e *core.RequestEvent) error {
 		defer func() {
 			if wasError {
 				removeUserFromHostSystem(user.ProxmoxUsername())
-				removeUserFromProxmox(user.ProxmoxUsername(), "pam")
+				removeUserFromProxmox(user.ProxmoxUsername(), user.ProxmoxRealm())
 				removePool(user.UserId())
 				defaultRangeRecord, findErr := txApp.FindFirstRecordByData("ranges", "rangeID", user.DefaultRangeId())
 				if findErr == nil && defaultRangeRecord != nil {
@@ -413,7 +429,11 @@ func DeleteUser(e *core.RequestEvent) error {
 		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Error running ansible playbook: %v (output: %v)", err, output))
 	}
 
-	err = removeUserFromProxmox(user.ProxmoxUsername(), "pam")
+	userRealm := user.ProxmoxRealm()
+	if userRealm == "" {
+		userRealm = ConfiguredProxmoxRealm()
+	}
+	err = removeUserFromProxmox(user.ProxmoxUsername(), userRealm)
 	if err != nil {
 		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Error removing user from Proxmox: %v", err))
 	}
@@ -699,7 +719,8 @@ func PostCredentials(e *core.RequestEvent) error {
 		return JSONError(e, http.StatusForbidden, "You are not an admin and cannot update the password for another user")
 	}
 
-	err = setProxmoxSystemPassword(user.ProxmoxUsername(), user.ProxmoxRealm(), credsToUpdate.ProxmoxPassword)
+	oldProxmoxPassword, _ := DecryptStringFromDatabase(user.ProxmoxPassword())
+	err = setProxmoxSystemPassword(user.ProxmoxUsername(), user.ProxmoxRealm(), credsToUpdate.ProxmoxPassword, oldProxmoxPassword)
 	if err != nil {
 		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Error setting Proxmox system password: %v", err))
 	}

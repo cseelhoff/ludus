@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	ludusapi "ludusapi"
+	"net/url"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -184,12 +186,65 @@ func humanizeKB(kb int64) string {
 
 // --- Impure wrapper (integration-tested manually) ---
 
-// enumerateDatastores runs `pvesm` and `pvesh` to list Proxmox storages.
+func parseRemoteNodeStorage(jsonBytes []byte) ([]Datastore, error) {
+	var raw []struct {
+		Storage string `json:"storage"`
+		Type    string `json:"type"`
+		Content string `json:"content"`
+		Active  int    `json:"active"`
+		Enabled int    `json:"enabled"`
+		Avail   int64  `json:"avail"`
+	}
+	if err := json.Unmarshal(jsonBytes, &raw); err != nil {
+		return nil, fmt.Errorf("remote node storage: unmarshal: %w", err)
+	}
+	out := make([]Datastore, 0, len(raw))
+	for _, r := range raw {
+		if r.Active != 1 {
+			continue
+		}
+		content := []string{}
+		if r.Content != "" {
+			for _, c := range strings.Split(r.Content, ",") {
+				c = strings.TrimSpace(c)
+				if c != "" {
+					content = append(content, c)
+				}
+			}
+		}
+		out = append(out, Datastore{
+			Name:    r.Storage,
+			Type:    r.Type,
+			Content: content,
+			Active:  true,
+			AvailKB: r.Avail / 1024,
+		})
+	}
+	return out, nil
+}
+
+// enumerateDatastores runs `pvesm` and `pvesh` to list Proxmox storages, or queries
+// the remote Proxmox HTTPS API when remote_proxmox mode is active.
 // Contract:
-//   - (nil, nil)  when pvesm is not on PATH (fresh Debian 12 / non-Proxmox host).
-//   - (nil, err)  when a CLI call fails or output is unparseable.
+//   - (nil, nil)  when pvesm is not on PATH and remote_proxmox is disabled.
+//   - (nil, err)  when a CLI/API call fails or output is unparseable.
 //   - (slice, nil) on success; inactive rows already filtered out.
 func enumerateDatastores() ([]Datastore, error) {
+	if (remoteProxmoxMode || config.RemoteProxmox) && strings.TrimSpace(config.ProxmoxNode) != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		rc, err := ludusapi.NewProxmoxBestEffortAdminClient(ctx, &config)
+		if err != nil {
+			return nil, fmt.Errorf("remote proxmox client: %w", err)
+		}
+		var nodeRaw json.RawMessage
+		nodePath := fmt.Sprintf("/nodes/%s/storage", url.PathEscape(strings.TrimSpace(config.ProxmoxNode)))
+		if err := rc.Get(ctx, nodePath, &nodeRaw); err != nil {
+			return nil, fmt.Errorf("remote %s: %w", nodePath, err)
+		}
+		return parseRemoteNodeStorage(nodeRaw)
+	}
+
 	// Fresh-install path: pvesm isn't present yet.
 	if _, err := exec.LookPath("pvesm"); err != nil {
 		return nil, nil

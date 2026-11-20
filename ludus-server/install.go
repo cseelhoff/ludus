@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	ludusapi "ludusapi"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/apenella/go-ansible/pkg/execute"
 	"github.com/apenella/go-ansible/pkg/options"
@@ -56,7 +58,7 @@ func getInstallStep(existingProxmox bool) {
 	} else if fileExists(fmt.Sprintf("%s/install/.stage-1-complete", ludusInstallPath)) {
 		log.Println("Step 1 complete, running step 2. The machine will reboot at the end of this step.")
 	} else {
-		if interactiveInstall {
+		if interactiveInstall && !remoteProxmoxMode && !config.RemoteProxmox {
 			runInteractiveInstall(existingProxmox)
 		}
 		// We need to write the canary file if not on an existing proxmox install no matter if this is interactive or not
@@ -78,6 +80,18 @@ func runInstallPlaybook(existingProxmox bool) {
 		panic(err)
 	}
 	extraVars := map[string]interface{}{"in_tty": inTTYBool}
+	if remoteProxmoxMode || config.RemoteProxmox {
+		extraVars["remote_proxmox"] = true
+		extraVars["ludus_nat_interface"] = config.EffectiveLudusNATInterface()
+		extraVars["proxmox_realm"] = config.EffectiveProxmoxRealm()
+		packerPluginVer := "1.2.3"
+		verCtx, verCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if pveVer, verErr := ludusapi.GetRemoteProxmoxVersion(verCtx, &config); verErr == nil && versionMeetsMinimum(strings.TrimSpace(pveVer), "9.1.0") {
+			packerPluginVer = minPackerProxmoxPluginVersion
+		}
+		verCancel()
+		extraVars["packer_proxmox_plugin_version"] = packerPluginVer
+	}
 
 	log.Println("Running ludus install playbook")
 	ansiblePlaybookConnectionOptions := &options.AnsibleConnectionOptions{
@@ -100,7 +114,9 @@ func runInstallPlaybook(existingProxmox bool) {
 	)
 
 	var installPlaybook []string
-	if existingProxmox {
+	if remoteProxmoxMode || config.RemoteProxmox {
+		installPlaybook = []string{fmt.Sprintf("%s/ansible/proxmox-install/remote-proxmox-vm.yml", ludusInstallPath)}
+	} else if existingProxmox {
 		installPlaybook = []string{fmt.Sprintf("%s/ansible/proxmox-install/existing-proxmox.yml", ludusInstallPath)}
 	} else {
 		installPlaybook = []string{fmt.Sprintf("%s/ansible/proxmox-install/main.yml", ludusInstallPath)}
@@ -130,7 +146,7 @@ func installAnsibleWithPip() {
 		log.Println("  Installing python3-pip...")
 		Run("DEBIAN_FRONTEND=noninteractive apt-get -qqy install python3-pip", false, true)
 		log.Println("  Installing ansible with pip...")
-		Run("python3 -m pip install ansible==9.3.0 netaddr==1.2.1 --break-system-packages", false, true)
+		Run("python3 -m pip install ansible==9.3.0 netaddr==1.2.1 --break-system-packages --ignore-installed", false, true)
 		log.Println("  Printing ansible version...")
 		Run("ansible --version", true, true)
 	}

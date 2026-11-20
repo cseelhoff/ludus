@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"embed"
 	"fmt"
@@ -187,9 +188,14 @@ func main() {
 
 	// Sanity checks
 	checkArgs()
+	remoteProxmoxMode = detectRemoteProxmoxMode()
 	checkDebian12or13()
-	checkForVirtualizationSupport()
-	generateConfigIfAutomatedInstall()
+	if !remoteProxmoxMode {
+		checkForVirtualizationSupport()
+		generateConfigIfAutomatedInstall()
+	} else {
+		log.Println("Remote Proxmox VM mode active (nested virtualization not required)")
+	}
 	inCluster = isInCluster()
 
 	// If we're done installing, serve the API
@@ -203,19 +209,31 @@ func main() {
 	// The install hasn't finished, so make sure we're root, then run through the install
 	checkRoot()
 
-	// If this is a proxmox 8 machine, print some warnings and set the bool
-	existingProxmox = checkForProxmox8or9()
+	if remoteProxmoxMode {
+		checkConfig()
+		checkRemoteProxmox8or9()
+		existingProxmox = true
+	} else {
+		// If this is a proxmox 8 machine, print some warnings and set the bool
+		existingProxmox = checkForProxmox8or9()
+	}
 
 	getInstallStep(existingProxmox)
 	// Use pip to install ansible because Debian's ansible apt package is 4 versions out of date (2.10, current is 2.14)
 	installAnsibleWithPip()
 	// Make sure we have the ansible galaxy package required for Ludus
 	installAnsibleRequirements()
+	if remoteProxmoxMode {
+		log.Println("Bootstrapping remote Proxmox VE roles, groups, pools, SDN, and ACLs via HTTPS API...")
+		if err := ludusapi.BootstrapRemoteProxmox(context.Background(), &config); err != nil {
+			log.Fatalf("Remote Proxmox bootstrap failed: %v", err)
+		}
+	}
 	// Run the install playbooks with ansible now that it is installed
 	runInstallPlaybook(existingProxmox)
 	// If initial-admin.yml exists, run bootstrap to create ROOT + initial admin.
 	time.Sleep(3 * time.Second)
-	if interactiveInstall {
+	if interactiveInstall || remoteProxmoxMode {
 		initialAdminPath := fmt.Sprintf("%s/install/initial-admin.yml", ludusInstallPath)
 		if fileExists(initialAdminPath) {
 			runBootstrapOnly()

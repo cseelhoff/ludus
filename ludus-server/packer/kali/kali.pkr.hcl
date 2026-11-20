@@ -100,6 +100,7 @@ source "proxmox-iso" "kali" {
   boot_key_interval = "100ms"
   boot_wait         = "15s"
   http_directory    = "./http"
+  http_interface    = "${var.ludus_nat_interface}"
 
   boot_iso {
     type              = "ide"

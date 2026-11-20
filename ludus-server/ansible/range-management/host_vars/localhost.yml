@@ -1,6 +1,9 @@
 # proxmox_kvm options
 api_user: "{{ lookup('env', 'PROXMOX_USERNAME') }}"
-api_host: "{{ lookup('env', 'PROXMOX_HOSTNAME') | default('127.0.0.1') }}"
+api_host: "{{ lookup('env', 'PROXMOX_HOSTNAME') | default('127.0.0.1', true) }}"
+proxmox_api_url: "{{ (lookup('env', 'PROXMOX_URL') | default('https://' + api_host + ':8006', true)) | regex_replace('/+$', '') }}"
+proxmox_validate_certs: "{{ not ((lookup('env', 'PROXMOX_INVALID_CERT') | default('true', true) | lower) in ['true', '1', 'yes']) }}"
+proxmox_curl_tls_flag: "{{ '-k' if not proxmox_validate_certs else '' }}"
 proxmox_full_token_id: "{{ lookup('env', 'PROXMOX_TOKEN') }}"
 proxmox_token_secret: "{{ lookup('env', 'PROXMOX_SECRET') }}"
 node_name: "{{ lookup('env', 'PROXMOX_NODE') }}"
