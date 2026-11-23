@@ -277,6 +277,19 @@
         group: ludus
         recurse: true
 
+    - name: Stat /opt/ludus/config.yml
+      ansible.builtin.stat:
+        path: "{{ ludus_install_path }}/config.yml"
+      register: ludus_config_stat
+
+    - name: Enforce 0640 root:ludus on /opt/ludus/config.yml so both ludus-admin and ludus can read it without world access
+      ansible.builtin.file:
+        path: "{{ ludus_install_path }}/config.yml"
+        owner: root
+        group: ludus
+        mode: '0640'
+      when: ludus_config_stat.stat.exists
+
     - name: Restore root-only ownership on install directory contents
       ansible.builtin.file:
         path: "{{ ludus_install_path }}/install"
