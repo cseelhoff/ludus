@@ -11,7 +11,12 @@
     - name: Set install path and interface defaults
       ansible.builtin.set_fact:
         ludus_install_path: "{{ install_path | default('/opt/ludus') }}"
-        pve_interface: "{{ proxmox_interface | default(ansible_default_ipv4.interface) }}"
+        pve_interface: >-
+          {{
+            (proxmox_interface | trim)
+            if (proxmox_interface is defined and (proxmox_interface | trim) != '' and (proxmox_interface | trim) in ansible_interfaces)
+            else (ansible_default_ipv4.interface | default(proxmox_interface | default('eth0')))
+          }}
         ludus_nat_interface: "{{ ludus_nat_interface | default('ludusnat') }}"
   tasks:
     - name: Setup ludus-install-status script
@@ -210,7 +215,12 @@
     - name: Set install path and WireGuard defaults
       ansible.builtin.set_fact:
         ludus_install_path: "{{ install_path | default('/opt/ludus') }}"
-        pve_interface: "{{ proxmox_interface | default(ansible_default_ipv4.interface) }}"
+        pve_interface: >-
+          {{
+            (proxmox_interface | trim)
+            if (proxmox_interface is defined and (proxmox_interface | trim) != '' and (proxmox_interface | trim) in ansible_interfaces)
+            else (ansible_default_ipv4.interface | default(proxmox_interface | default('eth0')))
+          }}
         ludus_nat_interface: "{{ ludus_nat_interface | default('ludusnat') }}"
   roles:
     - role: geerlingguy.packer
