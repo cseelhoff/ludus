@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -25,3 +27,30 @@ func TestParseRemoteNodeStorage(t *testing.T) {
 		t.Fatalf("unexpected local-zfs store: %+v", stores[1])
 	}
 }
+
+func TestPreStagedBinaryExtractsEmbeddedAssets(t *testing.T) {
+	tmp := t.TempDir()
+	prevInstallPath := ludusInstallPath
+	ludusInstallPath = tmp
+	t.Cleanup(func() { ludusInstallPath = prevInstallPath })
+
+	if err := os.WriteFile(filepath.Join(tmp, "ludus-server"), []byte("stub-binary"), 0755); err != nil {
+		t.Fatalf("write stub ludus-server: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "config.yml"), []byte("remote_proxmox: true\n"), 0600); err != nil {
+		t.Fatalf("write config.yml: %v", err)
+	}
+
+	checkDirAndReplaceFiles()
+
+	if _, err := os.Stat(filepath.Join(tmp, "ansible", "requirements.yml")); err != nil {
+		t.Fatalf("expected ansible/requirements.yml to be extracted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "ansible", "proxmox-install", "remote-proxmox-vm.yml")); err != nil {
+		t.Fatalf("expected remote-proxmox-vm.yml to be extracted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "config.yml")); err != nil {
+		t.Fatalf("expected pre-staged config.yml to be preserved: %v", err)
+	}
+}
+

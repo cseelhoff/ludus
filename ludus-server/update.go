@@ -185,6 +185,7 @@ func checkDirAndReplaceFiles() {
 
 	// Copy the ludus-server binary to the timestamp dir
 	if fileExists(fmt.Sprintf("%s/ludus-server", ludusInstallPath)) {
+		os.MkdirAll(fmt.Sprintf("%s/previous-versions/%s", ludusInstallPath, timestamp), 0755)
 		Run(fmt.Sprintf("cp %s/ludus-server %s/previous-versions/%s/ludus-server", ludusInstallPath, ludusInstallPath, timestamp), false, true)
 	}
 

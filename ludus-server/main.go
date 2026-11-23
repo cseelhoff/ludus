@@ -22,7 +22,7 @@ import (
 	"github.com/pocketbase/pocketbase/core"
 )
 
-const ludusInstallPath string = "/opt/ludus"
+var ludusInstallPath string = "/opt/ludus"
 
 var ludusPath string
 

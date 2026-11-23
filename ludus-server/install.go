@@ -48,6 +48,12 @@ func getInstallStep(existingProxmox bool) {
 		if fileExists(fmt.Sprintf("%s/config.yml", ludusPath)) {
 			copy(fmt.Sprintf("%s/config.yml", ludusPath), fmt.Sprintf("%s/config.yml", ludusInstallPath))
 		}
+	} else if ludusPath == ludusInstallPath && !fileExists(fmt.Sprintf("%s/ansible/requirements.yml", ludusInstallPath)) {
+		// Binary was staged directly in /opt/ludus before initial embedded-asset extraction.
+		checkDirAndReplaceFiles()
+		os.MkdirAll(fmt.Sprintf("%s/install", ludusInstallPath), 0700)
+		chownFileToUsername(installedBinaryPath, "root")
+		os.Chmod(installedBinaryPath, 0711)
 	}
 
 	if fileExists(fmt.Sprintf("%s/install/.stage-3-complete", ludusInstallPath)) {
