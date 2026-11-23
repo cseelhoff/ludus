@@ -20,12 +20,14 @@ import (
 // PUT /access/password, which Proxmox explicitly blocks for API tokens) as well
 // as pre-database bootstrap calls prior to PocketBase initialization.
 type ProxmoxRESTClient struct {
-	BaseURL    string
-	HTTPClient *http.Client
-	Ticket     string
-	CSRFToken  string
-	APITokenID string
-	APISecret  string
+	BaseURL      string
+	HTTPClient   *http.Client
+	Ticket       string
+	CSRFToken    string
+	AuthUser     string
+	AuthPassword string
+	APITokenID   string
+	APISecret    string
 }
 
 type pveEnvelope struct {
@@ -162,10 +164,12 @@ func NewProxmoxTicketClient(ctx context.Context, rawProxmoxURL string, skipVerif
 	}
 
 	return &ProxmoxRESTClient{
-		BaseURL:    baseURL,
-		HTTPClient: httpClient,
-		Ticket:     env.Data.Ticket,
-		CSRFToken:  env.Data.CSRFPreventionToken,
+		BaseURL:      baseURL,
+		HTTPClient:   httpClient,
+		Ticket:       env.Data.Ticket,
+		CSRFToken:    env.Data.CSRFPreventionToken,
+		AuthUser:     userID,
+		AuthPassword: password,
 	}, nil
 }
 
@@ -394,6 +398,20 @@ func createRootAPITokenViaAPI(cfg *Configuration) (string, string, error) {
 	return created.FullTokenID, created.Value, nil
 }
 
+// SetUserPassword updates targetUserID's password via PUT /api2/json/access/password.
+// Proxmox VE 8/9's reauth_user_for_user_modification requires confirmation-password
+// equal to the authenticated caller's password whenever the caller is not root@pam
+// (both for dedicated @pve admin principals and for self-service password rotation).
+func (c *ProxmoxRESTClient) SetUserPassword(ctx context.Context, targetUserID, newPassword string) error {
+	form := url.Values{}
+	form.Set("userid", targetUserID)
+	form.Set("password", newPassword)
+	if c.AuthUser != "" && c.AuthUser != "root@pam" && c.AuthPassword != "" {
+		form.Set("confirmation-password", c.AuthPassword)
+	}
+	return c.Do(ctx, http.MethodPut, "/access/password", form, nil)
+}
+
 // setProxmoxPasswordViaAPI updates a user's password via PUT /api2/json/access/password
 // using an admin ticket (or self-ticket fallback when oldPassword is supplied).
 func setProxmoxPasswordViaAPI(cfg *Configuration, username, realm, newPassword, oldPassword string) error {
@@ -411,10 +429,7 @@ func setProxmoxPasswordViaAPI(cfg *Configuration, username, realm, newPassword, 
 		return fmt.Errorf("obtaining Proxmox ticket to set password for %s: %w", fullUserID, err)
 	}
 
-	form := url.Values{}
-	form.Set("userid", fullUserID)
-	form.Set("password", newPassword)
-	if err := client.Do(ctx, http.MethodPut, "/access/password", form, nil); err != nil {
+	if err := client.SetUserPassword(ctx, fullUserID, newPassword); err != nil {
 		return fmt.Errorf("updating Proxmox password for %s: %w", fullUserID, err)
 	}
 	return nil
@@ -544,10 +559,7 @@ func ensureProxmoxUserAndACLsViaAPI(cfg *Configuration, username, realm, passwor
 	// Explicitly set/verify password via /access/password so existing @pve users or Proxmox
 	// versions that ignore password on user update always match the Ludus DB password.
 	if password != "" {
-		pwForm := url.Values{}
-		pwForm.Set("userid", fullUserID)
-		pwForm.Set("password", password)
-		if err := ticketClient.Do(ctx, http.MethodPut, "/access/password", pwForm, nil); err != nil {
+		if err := ticketClient.SetUserPassword(ctx, fullUserID, password); err != nil {
 			return fmt.Errorf("setting Proxmox password for %s: %w", fullUserID, err)
 		}
 	}

@@ -37,6 +37,7 @@ type mockProxmoxServer struct {
 	sdnZones    map[string]string            // zone -> type
 	sdnVNets    map[string]url.Values        // vnet -> form params
 	acls            []url.Values
+	delegatedAdmins map[string]bool
 	sdnApplied      int
 	tokenSeq        int
 	rejectSimpleTag bool
@@ -45,16 +46,17 @@ type mockProxmoxServer struct {
 func newMockProxmoxTLSServer(t *testing.T, version string, nodes []string) (*httptest.Server, *mockProxmoxServer) {
 	t.Helper()
 	m := &mockProxmoxServer{
-		version:   version,
-		nodes:     nodes,
-		users:     map[string]map[string]string{"root@pam": {"userid": "root@pam"}},
-		passwords: map[string]string{"root@pam": "root-secret-pw"},
-		tokens:    map[string]string{},
-		roles:     map[string]string{},
-		groups:    map[string]string{},
-		pools:     map[string]string{},
-		sdnZones:  map[string]string{},
-		sdnVNets:  map[string]url.Values{},
+		version:         version,
+		nodes:           nodes,
+		users:           map[string]map[string]string{"root@pam": {"userid": "root@pam"}},
+		passwords:       map[string]string{"root@pam": "root-secret-pw"},
+		tokens:          map[string]string{},
+		roles:           map[string]string{},
+		groups:          map[string]string{},
+		pools:           map[string]string{},
+		sdnZones:        map[string]string{},
+		sdnVNets:        map[string]url.Values{},
+		delegatedAdmins: map[string]bool{},
 		rejectSimpleTag: true,
 	}
 
@@ -166,9 +168,18 @@ func newMockProxmoxTLSServer(t *testing.T, version string, nodes []string) (*htt
 				return
 			}
 			target := form.Get("userid")
-			if authPrincipal != "root@pam" && authPrincipal != target {
-				writeErr(w, http.StatusForbidden, "insufficient privilege to change another user's password")
-				return
+			// Real Proxmox VE 8/9 reauth_user_for_user_modification requires confirmation-password
+			// equal to the caller's own password whenever authPrincipal != "root@pam".
+			if authPrincipal != "root@pam" {
+				confirmPW := form.Get("confirmation-password")
+				if confirmPW == "" || confirmPW != m.passwords[authPrincipal] {
+					writeErr(w, http.StatusBadRequest, "confirmation-password: password is required to modify user")
+					return
+				}
+				if authPrincipal != target && (!m.delegatedAdmins[authPrincipal] || strings.HasSuffix(target, "@pam")) {
+					writeErr(w, http.StatusForbidden, "insufficient privilege to change another user's password")
+					return
+				}
 			}
 			m.passwords[target] = form.Get("password")
 			writeJSON(w, http.StatusOK, nil)
@@ -677,6 +688,50 @@ func TestClusterNodePinningAndAllowlist(t *testing.T) {
 		if strings.HasPrefix(p, "/nodes/") && p != "/nodes/pve-prod-02" {
 			t.Fatalf("expected /nodes/* ACLs only on /nodes/pve-prod-02 when pinned, got %q", p)
 		}
+	}
+}
+
+func TestDelegatedPveAdminPrincipalWithConfirmationPassword(t *testing.T) {
+	srv, mock := newMockProxmoxTLSServer(t, "9.2.32", []string{"pve-prod-01", "pve-prod-02", "pve-prod-03"})
+	mock.sdnZones["ludus"] = "vxlan"
+	mock.users["ludus-ctrl-admin@pve"] = map[string]string{"userid": "ludus-ctrl-admin@pve"}
+	mock.passwords["ludus-ctrl-admin@pve"] = "svc-admin-pw-9232"
+	mock.delegatedAdmins["ludus-ctrl-admin@pve"] = true
+
+	pwFile := writeSecretFileForTest(t, "svc-admin-pw-9232")
+	cfg := &Configuration{
+		RemoteProxmox:            true,
+		ProxmoxURL:               srv.URL,
+		ProxmoxNode:              "pve-prod-02",
+		ProxmoxPinToNode:         true,
+		ClusterMode:              true,
+		SDNZone:                  "ludus",
+		ProxmoxInvalidCert:       true,
+		ProxmoxAdminUser:         "ludus-ctrl-admin@pve",
+		ProxmoxAdminPasswordFile: pwFile,
+		ProxmoxVMStoragePool:     "vm-storage",
+		ProxmoxISOStoragePool:    "fs-storage",
+	}
+	cfg.ApplyRemoteProxmoxDefaults()
+
+	if err := BootstrapRemoteProxmox(context.Background(), cfg); err != nil {
+		t.Fatalf("BootstrapRemoteProxmox as ludus-ctrl-admin@pve failed: %v", err)
+	}
+	tokID, tokSec, err := createRootAPITokenViaAPI(cfg)
+	if err != nil || tokID != "ludus-ctrl-admin@pve!ludus-token" || tokSec == "" {
+		t.Fatalf("createRootAPITokenViaAPI as ludus-ctrl-admin@pve = (%q, %q, %v)", tokID, tokSec, err)
+	}
+	if err := ensureProxmoxUserAndACLsViaAPI(cfg, "soc-op", "pve", "operator-pass-123", "SOCOP", false, true); err != nil {
+		t.Fatalf("ensureProxmoxUserAndACLsViaAPI as ludus-ctrl-admin@pve failed: %v", err)
+	}
+	if err := setProxmoxPasswordViaAPI(cfg, "soc-op", "pve", "operator-pass-456", ""); err != nil {
+		t.Fatalf("setProxmoxPasswordViaAPI as ludus-ctrl-admin@pve failed: %v", err)
+	}
+	mock.mu.Lock()
+	gotPW := mock.passwords["soc-op@pve"]
+	mock.mu.Unlock()
+	if gotPW != "operator-pass-456" {
+		t.Fatalf("expected soc-op@pve password 'operator-pass-456', got %q", gotPW)
 	}
 }
 
