@@ -278,16 +278,16 @@ func (s *Server) RunAnsiblePlaybookWithVariables(e *core.RequestEvent, playbookP
 	}
 	// If we are running as root, chown this log file to ludus:ludus to prevent potential issues when running future commands as a regular user
 	defer func() {
-		if os.Geteuid() == 0 {
+		if os.Geteuid() == 0 && !IsContainerMode() {
 			changeFileOwner(ansibleLogFilePath, "ludus")
 		}
 	}()
 	// defer is last in, first out, so this will close the file and then chown it
 	defer ansibleLogFile.Close()
 
-	proxmoxTokenSecret, err := DecryptStringFromDatabase(user.ProxmoxTokenSecret())
+	proxmoxAPIUser, proxmoxTokenID, proxmoxTokenSecret, err := ResolveProxmoxCredentialsForUser(user)
 	if err != nil {
-		return "", fmt.Errorf("could not decrypt proxmox token secret: %w", err)
+		return "", fmt.Errorf("could not resolve proxmox credentials: %w", err)
 	}
 
 	// If this is an access grant or revoke, we need to set the LUDUS_RETURN_ALL_RANGES environment variable to true so ansible can modify the target router
@@ -314,8 +314,8 @@ func (s *Server) RunAnsiblePlaybookWithVariables(e *core.RequestEvent, playbookP
 		execute.WithEnvVar("PROXMOX_URL", ServerConfiguration.ProxmoxURL),
 		execute.WithEnvVar("PROXMOX_HOSTNAME", ServerConfiguration.ProxmoxHostname),
 		// Inject creds for the dynamic inventory
-		execute.WithEnvVar("PROXMOX_USERNAME", user.ProxmoxUsername()+"@"+user.ProxmoxRealm()),
-		execute.WithEnvVar("PROXMOX_TOKEN", user.ProxmoxTokenId()),
+		execute.WithEnvVar("PROXMOX_USERNAME", proxmoxAPIUser),
+		execute.WithEnvVar("PROXMOX_TOKEN", proxmoxTokenID),
 		execute.WithEnvVar("PROXMOX_SECRET", proxmoxTokenSecret),
 		execute.WithEnvVar("LUDUS_RANGE_CONFIG", fmt.Sprintf("%s/ranges/%s/range-config.yml", ludusInstallPath, usersRange.RangeId())),
 		execute.WithEnvVar("LUDUS_RANGE_NUMBER", strconv.Itoa(int(usersRange.RangeNumber()))),
@@ -361,7 +361,7 @@ func (s *Server) RunAnsiblePlaybookWithVariables(e *core.RequestEvent, playbookP
         msg: "No user-defined roles to run"`,
 			false)
 		// If we are running as root, chown this file to ludus:ludus to prevent potential issues when deploying as a regular user
-		if os.Geteuid() == 0 {
+		if os.Geteuid() == 0 && !IsContainerMode() {
 			changeFileOwner(userDefinedRolePath, "ludus")
 		}
 	}
@@ -418,7 +418,7 @@ func runUserManagementPlaybookStandalone(playbookPath string, extraVars map[stri
 	}
 	defer func() {
 		ansibleLogFile.Close()
-		if os.Geteuid() == 0 {
+		if os.Geteuid() == 0 && !IsContainerMode() {
 			changeFileOwner(ansibleLogFilePath, "ludus")
 		}
 	}()
@@ -456,6 +456,12 @@ func runUserManagementPlaybookStandalone(playbookPath string, extraVars map[stri
 // Used when creating the initial admin user during InitDb. extraVars must include:
 // username, user_id, user_number, proxmox_public_ip, user_is_admin, proxmox_password.
 func RunAddUserPlaybookStandalone(extraVars map[string]interface{}) (string, error) {
+	if IsContainerMode() {
+		if err := provisionContainerUserWorkspace(extraVars); err != nil {
+			return "", err
+		}
+		return "provisioned container user workspace", nil
+	}
 	return runUserManagementPlaybookStandalone(
 		ludusInstallPath+"/ansible/user-management/add-user.yml",
 		extraVars,
@@ -465,6 +471,12 @@ func RunAddUserPlaybookStandalone(extraVars map[string]interface{}) (string, err
 // RunDeleteUserPlaybookStandalone runs the del-user playbook without a request
 // event or range context.
 func RunDeleteUserPlaybookStandalone(extraVars map[string]interface{}) (string, error) {
+	if IsContainerMode() {
+		if err := removeContainerUserWorkspace(extraVars); err != nil {
+			return "", err
+		}
+		return "removed container user workspace", nil
+	}
 	return runUserManagementPlaybookStandalone(
 		ludusInstallPath+"/ansible/user-management/del-user.yml",
 		extraVars,

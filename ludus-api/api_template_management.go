@@ -312,10 +312,10 @@ func setLatestPackerLogForUser(user *models.User, sourceLogPath string) error {
 }
 
 func buildVMFromTemplateWithPacker(user *models.User, packerFile string, templateName string, verbose bool, packerLogFile string) error {
-	proxmoxToken, err := DecryptStringFromDatabase(user.ProxmoxTokenSecret())
+	_, proxmoxTokenID, proxmoxToken, err := ResolveProxmoxCredentialsForUser(user)
 	if err != nil {
-		logger.Error(fmt.Sprintf("Unable to decrypt proxmox token secret: %v\n", err))
-		return fmt.Errorf("unable to decrypt proxmox token secret: %v", err)
+		logger.Error(fmt.Sprintf("Unable to resolve proxmox credentials: %v\n", err))
+		return fmt.Errorf("unable to resolve proxmox credentials: %v", err)
 	}
 	// Run the longest, grossest packer command you have ever seen...
 	// There should be a better way to do this, but apparently not: https://devops.stackexchange.com/questions/14181/is-it-possible-to-control-packer-from-golang
@@ -371,7 +371,7 @@ func buildVMFromTemplateWithPacker(user *models.User, packerFile string, templat
 		LudusNATInterface      string
 	}{
 		ludusInstallPath,
-		user.ProxmoxTokenId(),
+		proxmoxTokenID,
 		proxmoxToken,
 		usersPackerDir,
 		packerVerbose,

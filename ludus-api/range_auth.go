@@ -262,7 +262,7 @@ func validateAuthMaterial(paths ludusAuthMaterialPaths) error {
 }
 
 func setAuthMaterialOwner(paths ludusAuthMaterialPaths) error {
-	if os.Geteuid() != 0 {
+	if os.Geteuid() != 0 || IsContainerMode() {
 		return nil
 	}
 	for _, path := range []string{paths.MachineCredDir, paths.SSHKeyDir, paths.SSHKeyPath, paths.SSHPubKeyPath} {

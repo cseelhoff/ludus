@@ -18,12 +18,18 @@ var (
 	noAnsibleUpdate    bool
 	debugFlag          bool
 	remoteProxmoxFlag  bool
+	containerFlag      bool
+	adminServerFlag    bool
+	userServerFlag     bool
 )
 
 func init() {
 	flag.BoolVar(&updateFlag, "update", false, "update the ludus install with this binary and embedded files and restart the ludus services")
 	flag.BoolVar(&noPromptFlag, "no-prompt", false, "run the installer without prompting for confirmation")
 	flag.BoolVar(&remoteProxmoxFlag, "remote-proxmox", false, "run Ludus inside a non-nested VM targeting a remote Proxmox VE 8/9 host or cluster via HTTPS API")
+	flag.BoolVar(&containerFlag, "container", false, "run Ludus in unprivileged OCI container supervisor mode (manages both admin and user API servers)")
+	flag.BoolVar(&adminServerFlag, "admin", false, "run this process in ludus-admin API role (127.0.0.1:8081)")
+	flag.BoolVar(&userServerFlag, "user-server", false, "run this process in user-facing ludus API role (0.0.0.0:8080)")
 	flag.BoolVar(&versionFlag, "v", false, "print the version of this ludus server")
 	flag.BoolVar(&versionFlag, "version", false, "print the version of this ludus server")
 	flag.BoolVar(&helpFlag, "h", false, "display help information")
@@ -47,6 +53,10 @@ func checkArgs() {
 	}
 
 	if updateFlag {
+		if detectContainerMode() {
+			fmt.Println("ludus-server --update is disabled in container mode. Pull and redeploy the updated OCI container image instead.")
+			os.Exit(0)
+		}
 		checkRoot()
 		updateLudus()
 		os.Exit(0)

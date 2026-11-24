@@ -11,6 +11,9 @@ import (
 
 // Chown a file to a user and their group
 func chownFileToUsername(filePath string, username string) {
+	if IsContainerMode() || os.Geteuid() != 0 {
+		return
+	}
 	uid, gid, err := getUIDandGIDFromUsername(username)
 	if err != nil {
 		logger.Error("Failed to get UID and GID for user " + username + ": " + err.Error())
@@ -38,6 +41,9 @@ func chownDirRecursive(filePath string, uid, gid int) error {
 }
 
 func chownDirToUsernameRecursive(filePath string, username string) {
+	if IsContainerMode() || os.Geteuid() != 0 {
+		return
+	}
 	uid, gid, err := getUIDandGIDFromUsername(username)
 	if err != nil {
 		fmt.Printf("Failed to get UID and GID for user %s: %s\n", username, err)
@@ -49,6 +55,12 @@ func chownDirToUsernameRecursive(filePath string, username string) {
 }
 
 func setRangeDirPermissions(filePath string) {
+	if IsContainerMode() || os.Geteuid() != 0 {
+		if err := os.Chmod(filePath, 0770); err != nil {
+			logger.Error("Failed to chmod range directory: " + err.Error())
+		}
+		return
+	}
 	uid, _, err := getUIDandGIDFromUsername("ludus")
 	if err != nil {
 		logger.Error("Failed to get UID for user ludus: " + err.Error())

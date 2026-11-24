@@ -58,7 +58,7 @@ func (s *Server) checkLicense() {
 	ctx := context.Background()
 
 	var pluginsDir string
-	if os.Geteuid() == 0 {
+	if IsAdminProcess() {
 		pluginsDir = fmt.Sprintf("%s/plugins/enterprise/admin", ludusInstallPath)
 	} else {
 		pluginsDir = fmt.Sprintf("%s/plugins/enterprise", ludusInstallPath)

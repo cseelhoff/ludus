@@ -9,14 +9,95 @@ import (
 	"time"
 )
 
+// VerifyProxmoxServiceToken validates a least-privilege Proxmox service API token
+// over HTTPS (:8006) and idempotently ensures Ludus resource pools (SHARED, ADMIN)
+// and the SDN zone + ludusnat VNet without touching /access/roles, /access/groups,
+// /access/users, /access/password, or /access/acl.
+func VerifyProxmoxServiceToken(ctx context.Context, cfg *Configuration) error {
+	if cfg == nil {
+		cfg = &ServerConfiguration
+	}
+	cfg.ApplyRemoteProxmoxDefaults()
+
+	tokenID, tokenSecret, ok, err := ResolveProxmoxServiceToken(cfg)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("proxmox_auth_mode is service_token, but proxmox_api_token_id / proxmox_api_token_file is not configured")
+	}
+
+	client := NewProxmoxAPITokenClient(cfg.ProxmoxURL, cfg.ProxmoxInvalidCert, tokenID, tokenSecret)
+
+	var ver struct {
+		Version string `json:"version"`
+		Release string `json:"release"`
+	}
+	if err := client.Do(ctx, http.MethodGet, "/version", nil, &ver); err != nil {
+		return fmt.Errorf("querying remote Proxmox /version with service token %s: %w", tokenID, err)
+	}
+	verStr := ver.Version
+	if verStr == "" {
+		verStr = ver.Release
+	}
+	if !strings.HasPrefix(verStr, "8.") && !strings.HasPrefix(verStr, "9.") && verStr != "8" && verStr != "9" {
+		return fmt.Errorf("unsupported remote Proxmox VE version %q (Ludus requires Proxmox VE 8 or 9)", verStr)
+	}
+
+	var nodes []struct {
+		Node string `json:"node"`
+	}
+	if err := client.Do(ctx, http.MethodGet, "/nodes", nil, &nodes); err != nil {
+		return fmt.Errorf("listing Proxmox nodes with service token %s: %w", tokenID, err)
+	}
+	var nodeNames []string
+	for _, n := range nodes {
+		if n.Node != "" {
+			nodeNames = append(nodeNames, n.Node)
+		}
+	}
+	if targetNode := strings.TrimSpace(cfg.ProxmoxNode); targetNode != "" && len(nodeNames) > 0 && !containsString(nodeNames, targetNode) {
+		return fmt.Errorf("configured proxmox_node %q not visible to service token %s (visible nodes: %v)", targetNode, tokenID, nodeNames)
+	}
+
+	requiredPools := []struct {
+		PoolID  string
+		Comment string
+	}{
+		{PoolID: "SHARED", Comment: "Templates shared with all Ludus users"},
+		{PoolID: "ADMIN", Comment: "VMs managed by the Ludus admin"},
+	}
+	for _, pool := range requiredPools {
+		if err := ensureProxmoxPoolREST(ctx, client, pool.PoolID, pool.Comment); err != nil {
+			return err
+		}
+	}
+
+	clusterMode := len(nodes) > 1 || cfg.ClusterMode
+	zoneName := cfg.SDNZone
+	if zoneName == "" {
+		zoneName = "ludus"
+	}
+	natVNet := cfg.EffectiveLudusNATInterface()
+	if err := ensureSDNZoneAndNATVNetREST(ctx, client, zoneName, natVNet, cfg.VXLANTagBase, clusterMode); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // BootstrapRemoteProxmox idempotently configures a remote Proxmox VE 8/9 standalone host
 // or cluster over HTTPS (:8006) with all roles, groups, resource pools, SDN zone/VNet,
 // and ACLs required by Ludus — replacing local lae.proxmox / pveum / pvesh execution.
+// When proxmox_auth_mode is "service_token", it delegates to VerifyProxmoxServiceToken.
 func BootstrapRemoteProxmox(ctx context.Context, cfg *Configuration) error {
 	if cfg == nil {
 		cfg = &ServerConfiguration
 	}
 	cfg.ApplyRemoteProxmoxDefaults()
+	if cfg.IsServiceTokenAuthMode() {
+		return VerifyProxmoxServiceToken(ctx, cfg)
+	}
 
 	client, err := NewProxmoxBestEffortAdminClient(ctx, cfg)
 	if err != nil {

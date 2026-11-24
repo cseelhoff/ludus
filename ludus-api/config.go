@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -20,6 +22,12 @@ const LudusInstallPath = ludusInstallPath // Export the path for use in plugins
 const (
 	DefaultPort      = 8080
 	DefaultAdminPort = 8081
+)
+
+// Proxmox authentication modes supported by Ludus when targeting an external Proxmox host.
+const (
+	ProxmoxAuthModePerUserPVE   = "per_user_pve"
+	ProxmoxAuthModeServiceToken = "service_token"
 )
 
 // Configurations exported
@@ -50,6 +58,7 @@ type Configuration struct {
 	ReservedRangeNumbers      []int32       `mapstructure:"reserved_range_numbers" yaml:"reserved_range_numbers"`
 	DataDirectory             string        `mapstructure:"data_directory" yaml:"data_directory"`
 	DatabaseEncryptionKey     string        `mapstructure:"database_encryption_key" yaml:"database_encryption_key"`
+	DatabaseEncryptionKeyFile string        `mapstructure:"database_encryption_key_file" yaml:"database_encryption_key_file,omitempty"`
 	WireguardPort             int           `mapstructure:"wireguard_port" yaml:"wireguard_port"`
 	MaxLogHistory             int           `mapstructure:"max_log_history" yaml:"max_log_history"` // Max number of log history entries to keep per range/user (default: 100)
 	InactivityShutdownTimeout time.Duration `mapstructure:"inactivity_shutdown_timeout" yaml:"inactivity_shutdown_timeout"`
@@ -62,10 +71,46 @@ type Configuration struct {
 	ProxmoxPinToNode         bool     `mapstructure:"proxmox_pin_to_node" yaml:"proxmox_pin_to_node"`
 	ProxmoxAllowedNodes      []string `mapstructure:"proxmox_allowed_nodes" yaml:"proxmox_allowed_nodes,omitempty"`
 	ProxmoxRealm             string   `mapstructure:"proxmox_realm" yaml:"proxmox_realm"`
+	ProxmoxAuthMode          string   `mapstructure:"proxmox_auth_mode" yaml:"proxmox_auth_mode,omitempty"`
 	ProxmoxAdminUser         string   `mapstructure:"proxmox_admin_user" yaml:"proxmox_admin_user"`
 	ProxmoxAdminPasswordFile string   `mapstructure:"proxmox_admin_password_file" yaml:"proxmox_admin_password_file"`
+	ProxmoxAPITokenID        string   `mapstructure:"proxmox_api_token_id" yaml:"proxmox_api_token_id,omitempty"`
+	ProxmoxAPITokenFile      string   `mapstructure:"proxmox_api_token_file" yaml:"proxmox_api_token_file,omitempty"`
 	ProxmoxRootTokenID       string   `mapstructure:"proxmox_root_token_id" yaml:"proxmox_root_token_id"`
 	ProxmoxRootTokenFile     string   `mapstructure:"proxmox_root_token_file" yaml:"proxmox_root_token_file"`
+	// Container mode & listener settings (run ludus-server unprivileged in an OCI container)
+	ContainerMode bool  `mapstructure:"container_mode" yaml:"container_mode,omitempty"`
+	TLSEnabled    *bool `mapstructure:"tls_enabled" yaml:"tls_enabled,omitempty"`
+	// Edge VM self-provisioning & userspace mTLS proxy settings (ludus -> ludus-edge)
+	EdgeAutoProvision      bool     `mapstructure:"edge_auto_provision" yaml:"edge_auto_provision,omitempty"`
+	EdgeVMID               int      `mapstructure:"edge_vmid" yaml:"edge_vmid,omitempty"`
+	EdgeVMName             string   `mapstructure:"edge_vm_name" yaml:"edge_vm_name,omitempty"`
+	EdgeVMIP               string   `mapstructure:"edge_vm_ip" yaml:"edge_vm_ip,omitempty"`
+	EdgeVMCIDRPrefix       int      `mapstructure:"edge_vm_cidr_prefix" yaml:"edge_vm_cidr_prefix,omitempty"`
+	EdgeVMGateway          string   `mapstructure:"edge_vm_gateway" yaml:"edge_vm_gateway,omitempty"`
+	EdgeVMBridge           string   `mapstructure:"edge_vm_bridge" yaml:"edge_vm_bridge,omitempty"`
+	EdgeAllowedClientCIDRs []string `mapstructure:"edge_allowed_client_cidrs" yaml:"edge_allowed_client_cidrs,omitempty"`
+	EdgeISOPath            string   `mapstructure:"edge_iso_path" yaml:"edge_iso_path,omitempty"`
+	EdgeStateDir           string   `mapstructure:"edge_state_dir" yaml:"edge_state_dir,omitempty"`
+	EdgeProxyEnabled       bool     `mapstructure:"edge_proxy_enabled" yaml:"edge_proxy_enabled,omitempty"`
+	EdgeProxyAddr          string   `mapstructure:"edge_proxy_addr" yaml:"edge_proxy_addr,omitempty"`
+	EdgeProxyCAFile        string   `mapstructure:"edge_proxy_ca_file" yaml:"edge_proxy_ca_file,omitempty"`
+	EdgeProxyCertFile      string   `mapstructure:"edge_proxy_cert_file" yaml:"edge_proxy_cert_file,omitempty"`
+	EdgeProxyKeyFile       string   `mapstructure:"edge_proxy_key_file" yaml:"edge_proxy_key_file,omitempty"`
+	EdgeLocalSOCKSPort     int      `mapstructure:"edge_local_socks_port" yaml:"edge_local_socks_port,omitempty"`
+	EdgeNATIP              string   `mapstructure:"edge_nat_ip" yaml:"edge_nat_ip,omitempty"`
+	PackerHTTPPortMin      int      `mapstructure:"packer_http_port_min" yaml:"packer_http_port_min,omitempty"`
+	PackerHTTPPortMax      int      `mapstructure:"packer_http_port_max" yaml:"packer_http_port_max,omitempty"`
+	// Pre-baked WireGuard client slot pool file (250 slots derived on ludus-edge)
+	WireguardPoolFile string `mapstructure:"wireguard_pool_file" yaml:"wireguard_pool_file,omitempty"`
+	// Declarative OIDC provider settings (e.g. Sophon Keycloak)
+	OIDCEnabled          bool     `mapstructure:"oidc_enabled" yaml:"oidc_enabled,omitempty"`
+	OIDCDisplayName      string   `mapstructure:"oidc_display_name" yaml:"oidc_display_name,omitempty"`
+	OIDCIssuerURL        string   `mapstructure:"oidc_issuer_url" yaml:"oidc_issuer_url,omitempty"`
+	OIDCClientID         string   `mapstructure:"oidc_client_id" yaml:"oidc_client_id,omitempty"`
+	OIDCClientSecretFile string   `mapstructure:"oidc_client_secret_file" yaml:"oidc_client_secret_file,omitempty"`
+	OIDCAllowedGroups    []string `mapstructure:"oidc_allowed_groups" yaml:"oidc_allowed_groups,omitempty"`
+	OIDCAdminGroups      []string `mapstructure:"oidc_admin_groups" yaml:"oidc_admin_groups,omitempty"`
 	// Quota defaults - applied to users who don't have explicit quotas or group defaults
 	// 0 means unlimited
 	DefaultQuotaRAM    int `mapstructure:"default_quota_ram" yaml:"default_quota_ram"`
@@ -111,6 +156,7 @@ func (s *Server) ParseConfig() {
 	// so we can detect if user has explicitly set it or not and fallback to API if unset.
 	// (See IsClusterMode in sdn.go for logic)
 	viper.SetDefault("remote_proxmox", false)
+	viper.SetDefault("container_mode", false)
 	viper.SetDefault("proxmox_pin_to_node", false)
 	viper.SetDefault("proxmox_admin_user", "root@pam")
 	viper.SetDefault("sdn_zone", "ludus") // Default SDN zone name
@@ -134,6 +180,9 @@ func (s *Server) ParseConfig() {
 	ConfigMu.Unlock()
 	if err != nil {
 		log.Fatalf("Unable to decode into struct, %v", err)
+	}
+	if err := ServerConfiguration.LoadEncryptionKeyFromFileIfConfigured(); err != nil {
+		log.Fatalf("Unable to load database encryption key: %v", err)
 	}
 	// Make sure the database encryption key is 32 characters long
 	if len(ServerConfiguration.DatabaseEncryptionKey) != 32 {
@@ -226,9 +275,72 @@ func (c *Configuration) ResolveProxmoxHostname() string {
 	return c.ProxmoxNode
 }
 
+// EffectiveProxmoxAuthMode returns "service_token" or "per_user_pve".
+// When unset, it auto-selects "service_token" if proxmox_api_token_id is configured
+// or if container_mode is enabled without a proxmox_admin_password_file.
+func (c *Configuration) EffectiveProxmoxAuthMode() string {
+	mode := strings.ToLower(strings.TrimSpace(c.ProxmoxAuthMode))
+	switch mode {
+	case ProxmoxAuthModeServiceToken:
+		return ProxmoxAuthModeServiceToken
+	case ProxmoxAuthModePerUserPVE:
+		return ProxmoxAuthModePerUserPVE
+	}
+	if strings.TrimSpace(c.ProxmoxAPITokenID) != "" {
+		return ProxmoxAuthModeServiceToken
+	}
+	if strings.TrimSpace(os.Getenv("LUDUS_PROXMOX_API_TOKEN_ID")) != "" {
+		return ProxmoxAuthModeServiceToken
+	}
+	if c.ContainerMode && strings.TrimSpace(c.ProxmoxAdminPasswordFile) == "" {
+		return ProxmoxAuthModeServiceToken
+	}
+	return ProxmoxAuthModePerUserPVE
+}
+
+// IsServiceTokenAuthMode reports whether Ludus authenticates all Proxmox API calls
+// with a single shared service token and performs zero Proxmox IAM/ACL mutations.
+func (c *Configuration) IsServiceTokenAuthMode() bool {
+	return c.EffectiveProxmoxAuthMode() == ProxmoxAuthModeServiceToken
+}
+
+// IsTLSEnabled reports whether the Ludus HTTP listeners terminate TLS directly
+// (default true when tls_enabled is omitted).
+func (c *Configuration) IsTLSEnabled() bool {
+	return c.TLSEnabled == nil || *c.TLSEnabled
+}
+
+// LoadEncryptionKeyFromFileIfConfigured loads DatabaseEncryptionKey from
+// DatabaseEncryptionKeyFile (or LUDUS_DATABASE_ENCRYPTION_KEY_FILE) when set.
+func (c *Configuration) LoadEncryptionKeyFromFileIfConfigured() error {
+	keyFile := strings.TrimSpace(c.DatabaseEncryptionKeyFile)
+	if envFile := strings.TrimSpace(os.Getenv("LUDUS_DATABASE_ENCRYPTION_KEY_FILE")); envFile != "" {
+		keyFile = envFile
+	}
+	if keyFile == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(keyFile)
+	if err != nil {
+		return fmt.Errorf("read database_encryption_key_file %q: %w", keyFile, err)
+	}
+	key := strings.TrimRight(string(raw), "\r\n")
+	if len(key) != 32 {
+		return fmt.Errorf("database_encryption_key_file %q must contain 32 bytes, got %d", keyFile, len(key))
+	}
+	c.DatabaseEncryptionKey = key
+	return nil
+}
+
 // ApplyRemoteProxmoxDefaults normalizes derived realm, hostname, admin user, SDN zone,
-// Proxmox URL base, TLS verification alias, and NAT interface defaults on Configuration.
+// Proxmox URL base, TLS verification alias, container/edge defaults, and NAT interface defaults on Configuration.
 func (c *Configuration) ApplyRemoteProxmoxDefaults() {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("LUDUS_CONTAINER_MODE")), "true") || strings.TrimSpace(os.Getenv("LUDUS_CONTAINER_MODE")) == "1" {
+		c.ContainerMode = true
+	}
+	if c.ContainerMode {
+		c.RemoteProxmox = true
+	}
 	if trimmedURL := strings.TrimSpace(c.ProxmoxURL); trimmedURL != "" {
 		trimmedURL = strings.TrimRight(trimmedURL, "/")
 		trimmedURL = strings.TrimSuffix(trimmedURL, "/api2/json")
@@ -237,12 +349,59 @@ func (c *Configuration) ApplyRemoteProxmoxDefaults() {
 	if c.ProxmoxTLSVerify != nil {
 		c.ProxmoxInvalidCert = !(*c.ProxmoxTLSVerify)
 	}
+	c.ProxmoxAuthMode = c.EffectiveProxmoxAuthMode()
 	c.ProxmoxRealm = c.EffectiveProxmoxRealm()
 	c.ProxmoxAdminUser = c.EffectiveProxmoxAdminUser()
 	c.LudusNATInterface = c.EffectiveLudusNATInterface()
 	c.ProxmoxHostname = c.ResolveProxmoxHostname()
 	if strings.TrimSpace(c.SDNZone) == "" {
 		c.SDNZone = "ludus"
+	}
+	dataDir := strings.TrimSpace(c.DataDirectory)
+	if dataDir == "" {
+		dataDir = filepath.Join(ludusInstallPath, "db")
+	}
+	if strings.TrimSpace(c.EdgeVMName) == "" {
+		c.EdgeVMName = "ludus-edge"
+	}
+	if c.EdgeVMCIDRPrefix == 0 {
+		c.EdgeVMCIDRPrefix = 24
+	}
+	if strings.TrimSpace(c.EdgeVMBridge) == "" {
+		c.EdgeVMBridge = "vmbr0"
+	}
+	if strings.TrimSpace(c.EdgeISOPath) == "" {
+		c.EdgeISOPath = filepath.Join(ludusInstallPath, "resources", "ludus-edge.iso")
+	}
+	if strings.TrimSpace(c.EdgeStateDir) == "" {
+		c.EdgeStateDir = filepath.Join(dataDir, "edge")
+	}
+	if c.EdgeLocalSOCKSPort == 0 {
+		c.EdgeLocalSOCKSPort = 1080
+	}
+	if strings.TrimSpace(c.EdgeNATIP) == "" {
+		c.EdgeNATIP = "192.0.2.254"
+	}
+	if c.PackerHTTPPortMin == 0 {
+		c.PackerHTTPPortMin = 8350
+	}
+	if c.PackerHTTPPortMax == 0 {
+		c.PackerHTTPPortMax = 8360
+	}
+	if strings.TrimSpace(c.EdgeProxyAddr) == "" && strings.TrimSpace(c.EdgeVMIP) != "" && (c.EdgeProxyEnabled || c.EdgeAutoProvision) {
+		c.EdgeProxyAddr = fmt.Sprintf("%s:8444", strings.TrimSpace(c.EdgeVMIP))
+	}
+	if strings.TrimSpace(c.WireguardPoolFile) == "" && (c.EdgeProxyEnabled || c.EdgeAutoProvision) {
+		c.WireguardPoolFile = filepath.Join(c.EdgeStateDir, "wireguard-pool.json")
+	}
+	if strings.TrimSpace(c.EdgeProxyCAFile) == "" && c.EdgeAutoProvision {
+		c.EdgeProxyCAFile = filepath.Join(c.EdgeStateDir, "ca.crt")
+	}
+	if strings.TrimSpace(c.EdgeProxyCertFile) == "" && c.EdgeAutoProvision {
+		c.EdgeProxyCertFile = filepath.Join(c.EdgeStateDir, "client.crt")
+	}
+	if strings.TrimSpace(c.EdgeProxyKeyFile) == "" && c.EdgeAutoProvision {
+		c.EdgeProxyKeyFile = filepath.Join(c.EdgeStateDir, "client.key")
 	}
 }
 
@@ -301,6 +460,28 @@ func ConfiguredProxmoxRealm() string {
 	ConfigMu.RLock()
 	defer ConfigMu.RUnlock()
 	return ServerConfiguration.EffectiveProxmoxRealm()
+}
+
+// IsContainerMode reports whether Ludus is running in unprivileged OCI container mode.
+func IsContainerMode() bool {
+	ConfigMu.RLock()
+	defer ConfigMu.RUnlock()
+	return ServerConfiguration.ContainerMode
+}
+
+// IsProxmoxServiceTokenMode reports whether Proxmox authentication is configured
+// in shared service-token mode (zero Proxmox @pve user or ACL mutations).
+func IsProxmoxServiceTokenMode() bool {
+	ConfigMu.RLock()
+	defer ConfigMu.RUnlock()
+	return ServerConfiguration.IsServiceTokenAuthMode()
+}
+
+// IsTLSEnabled reports whether TLS is enabled on the Ludus HTTP listeners.
+func IsTLSEnabled() bool {
+	ConfigMu.RLock()
+	defer ConfigMu.RUnlock()
+	return ServerConfiguration.IsTLSEnabled()
 }
 
 // ApplyPortDefaultsAndValidate backfills DefaultPort / DefaultAdminPort for

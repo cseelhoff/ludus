@@ -6,7 +6,6 @@ import (
 	"math"
 	"net"
 	"net/http"
-	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -55,7 +54,7 @@ func provisionNewUser(txApp core.App, user *models.User, plaintextPassword strin
 		return "", fmt.Errorf("running add-user playbook: %w (output: %s)", err, output)
 	}
 
-	if ServerConfiguration.RemoteProxmox || user.ProxmoxRealm() != "pam" {
+	if !IsProxmoxServiceTokenMode() && (ServerConfiguration.RemoteProxmox || user.ProxmoxRealm() != "pam") {
 		if err := ensureProxmoxUserAndACLsViaAPI(
 			&ServerConfiguration,
 			user.ProxmoxUsername(),
@@ -87,7 +86,7 @@ func provisionNewUser(txApp core.App, user *models.User, plaintextPassword strin
 	user.SetProxmoxTokenId(tokenID)
 	user.SetProxmoxTokenSecret(encryptedTokenSecret)
 
-	if user.DefaultRangeId() != "" {
+	if user.DefaultRangeId() != "" && !IsProxmoxServiceTokenMode() {
 		if err := GrantUserProxmoxAccessToDefaultRange(txApp, user); err != nil {
 			return "", fmt.Errorf("granting Proxmox access to default range: %w", err)
 		}
@@ -107,7 +106,7 @@ func AddUser(e *core.RequestEvent) error {
 		return JSONError(e, http.StatusUnauthorized, "You are not an admin and cannot add users")
 	}
 
-	if os.Geteuid() != 0 {
+	if !IsAdminProcess() {
 		return JSONError(e, http.StatusForbidden, adminEndpointError("ludus users add"))
 	}
 
@@ -275,7 +274,7 @@ func validateInternalToken(token string, expectedUserID string, expectedIsAdmin 
 // to delegate user provisioning to the root API (port 8081). It is protected by
 // a localhost check, root euid check, and an encrypted internal token.
 func ProvisionOAuth2User(e *core.RequestEvent) error {
-	if os.Geteuid() != 0 {
+	if !IsAdminProcess() {
 		return JSONError(e, http.StatusForbidden, "This endpoint is only available on the admin API")
 	}
 
@@ -387,7 +386,7 @@ func DeleteUser(e *core.RequestEvent) error {
 		return JSONError(e, http.StatusForbidden, "You are not an admin and cannot delete users")
 	}
 
-	if os.Geteuid() != 0 {
+	if !IsAdminProcess() {
 		return JSONError(e, http.StatusForbidden, adminEndpointError("ludus users rm"))
 	}
 
@@ -545,6 +544,9 @@ func GetAPIKey(e *core.RequestEvent) error {
 
 // GetCredentials - get the proxmox creds for the user
 func GetCredentials(e *core.RequestEvent) error {
+	if IsProxmoxServiceTokenMode() {
+		return JSONError(e, http.StatusBadRequest, "Direct Proxmox user credentials are disabled when proxmox_auth_mode is service_token; authenticate via Ludus or LUX")
+	}
 	user := e.Get("user").(*models.User)
 
 	proxmoxPassword := user.ProxmoxPassword()
@@ -719,10 +721,12 @@ func PostCredentials(e *core.RequestEvent) error {
 		return JSONError(e, http.StatusForbidden, "You are not an admin and cannot update the password for another user")
 	}
 
-	oldProxmoxPassword, _ := DecryptStringFromDatabase(user.ProxmoxPassword())
-	err = setProxmoxSystemPassword(user.ProxmoxUsername(), user.ProxmoxRealm(), credsToUpdate.ProxmoxPassword, oldProxmoxPassword)
-	if err != nil {
-		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Error setting Proxmox system password: %v", err))
+	if !IsProxmoxServiceTokenMode() {
+		oldProxmoxPassword, _ := DecryptStringFromDatabase(user.ProxmoxPassword())
+		err = setProxmoxSystemPassword(user.ProxmoxUsername(), user.ProxmoxRealm(), credsToUpdate.ProxmoxPassword, oldProxmoxPassword)
+		if err != nil {
+			return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Error setting Proxmox system password: %v", err))
+		}
 	}
 
 	// Encrypt the new password
@@ -739,9 +743,12 @@ func PostCredentials(e *core.RequestEvent) error {
 		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Error saving user: %v", err))
 	}
 
-	// File saved successfully. Return proper result
+	msg := fmt.Sprintf("The Ludus and Proxmox password for %s has been successfully updated", user.UserId())
+	if IsProxmoxServiceTokenMode() {
+		msg = fmt.Sprintf("The Ludus password for %s has been successfully updated", user.UserId())
+	}
 	response := dto.PostCredentialsResponse{
-		Result: fmt.Sprintf("The Ludus and Proxmox password for %s has been successfully updated", user.UserId()),
+		Result: msg,
 	}
 	return e.JSON(http.StatusOK, response)
 }

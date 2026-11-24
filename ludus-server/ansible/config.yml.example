@@ -29,3 +29,28 @@ create_default_range: true        # Create a default range for each new user, in
 # proxmox_vm_storage_pool: "local-zfs"               # Outer Proxmox VM/template datastore
 # proxmox_vm_storage_format: "raw"                   # "raw" for ZFS/LVM-thin/Ceph, "qcow2" for dir/NFS
 # proxmox_iso_storage_pool: "local"                  # Outer Proxmox ISO datastore
+
+# --- Container Architecture Mode (rootless Podman/Docker + Proxmox service token + ludus-edge VM) ---
+# container_mode: true
+# tls_enabled: false                                 # Set false when TLS is terminated upstream (e.g. Traefik)
+# database_encryption_key_file: "/run/secrets/ludus_db_encryption_key"
+# proxmox_auth_mode: "service_token"                 # Least-privilege shared PVEAPIToken (zero Proxmox passwords or @pve user creation)
+# proxmox_api_token_id: "ludus-svc@pve!controller"
+# proxmox_api_token_file: "/run/secrets/ludus_proxmox_api_token"
+# edge_auto_provision: true                          # Automatically deploy/reconcile Alpine ludus-edge VM via Proxmox :8006
+# edge_vmid: 121
+# edge_vm_name: "ludus-edge"
+# edge_vm_ip: "10.0.20.181"
+# edge_vm_cidr_prefix: 24
+# edge_vm_gateway: "10.0.20.1"
+# edge_vm_bridge: "vmbr0"
+# edge_allowed_client_cidrs: ["10.0.20.0/24", "100.64.0.0/10"]
+# edge_proxy_enabled: true                           # Route range SSH/WinRM, Packer HTTP, and router control via ludus-edge mTLS proxy
+# edge_proxy_addr: "10.0.20.181:8444"
+# oidc_enabled: true                                 # Optional declarative OIDC SSO (e.g. Keycloak)
+# oidc_display_name: "Keycloak"
+# oidc_issuer_url: "https://auth.example.com/realms/main"
+# oidc_client_id: "ludus"
+# oidc_client_secret_file: "/run/secrets/ludus_oidc_client_secret"
+# oidc_allowed_groups: ["ludus-users", "ludus-admins"]
+# oidc_admin_groups: ["ludus-admins"]

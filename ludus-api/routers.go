@@ -108,7 +108,7 @@ func NewRouter(ludusVersion string, ludusServer *Server) *core.App {
 		}
 	}
 	LudusVersion = ludusVersion
-	if os.Geteuid() != 0 {
+	if !IsAdminProcess() {
 		if err := startupSyncTemplatesCollection(app); err != nil {
 			logger.Error(fmt.Sprintf("Error syncing templates collection on startup: %v", err))
 		}
@@ -121,7 +121,7 @@ func NewRouter(ludusVersion string, ludusServer *Server) *core.App {
 	}
 
 	// Setup SDN zone + NAT VNet when SDN is active (cluster mode or RemoteProxmox VM mode)
-	if UseSDN && os.Geteuid() == 0 {
+	if UseSDN && IsAdminProcess() {
 		if err := setupSDNZone(); err != nil {
 			logger.Error(fmt.Sprintf("Error setting up SDN zone: %v", err))
 		}
@@ -134,7 +134,11 @@ func NewRouter(ludusVersion string, ludusServer *Server) *core.App {
 	webUIAvailable := checkEmbeddedWebUI()
 
 	// Setup a reverse proxy for the admin API
-	adminURL, _ := url.Parse(fmt.Sprintf("https://127.0.0.1:%d", ServerConfiguration.AdminPort))
+	adminScheme := "https"
+	if !IsTLSEnabled() {
+		adminScheme = "http"
+	}
+	adminURL, _ := url.Parse(fmt.Sprintf("%s://127.0.0.1:%d", adminScheme, ServerConfiguration.AdminPort))
 	adminProxy = httputil.NewSingleHostReverseProxy(adminURL)
 	customTransport := &http.Transport{
 		TLSClientConfig: &tls.Config{
@@ -144,7 +148,7 @@ func NewRouter(ludusVersion string, ludusServer *Server) *core.App {
 	adminProxy.Transport = customTransport
 
 	// Serve the web UI from PocketBase if available
-	if webUIAvailable && os.Geteuid() != 0 {
+	if webUIAvailable && !IsAdminProcess() {
 		logger.Debug("Serving web UI at /ui")
 		app.OnServe().BindFunc(func(se *core.ServeEvent) error {
 			webUIFSRoot, err := fs.Sub(embeddedWebUI, "webUI")
@@ -158,7 +162,7 @@ func NewRouter(ludusVersion string, ludusServer *Server) *core.App {
 	}
 
 	// Serve the docs from PocketBase if available
-	if docsAvailable && os.Geteuid() != 0 {
+	if docsAvailable && !IsAdminProcess() {
 		logger.Debug("Serving docs at /ludus")
 		app.OnServe().BindFunc(func(se *core.ServeEvent) error {
 			docsFSRoot, err := fs.Sub(embeddedDocs, "docs")
@@ -307,7 +311,7 @@ func NewRouter(ludusVersion string, ludusServer *Server) *core.App {
 		// Only the main (non-root) service manages sources on disk. The root
 		// admin service shares the same code path but would git-fetch as root,
 		// leaving root-owned files the main service cannot update on later syncs.
-		if os.Geteuid() != 0 {
+		if !IsAdminProcess() {
 			seedDefaultSourceBSL(app)
 			SyncAllSourcesOnStartup(app)
 		}

@@ -607,6 +607,10 @@ func setupNATVNet() error {
 		logger.Debug(fmt.Sprintf("VNet %s already exists, ensuring ACLs", natVNet))
 	}
 
+	if IsProxmoxServiceTokenMode() {
+		return nil
+	}
+
 	// Make sure all ludus users have SDN.Use on the ludusnat vnet
 	SDNVNetACL := goproxmox.ACLOptions{
 		Path:      fmt.Sprintf("/sdn/zones/%s/%s", zoneName, natVNet),
@@ -665,6 +669,9 @@ func removeRouteForRangeNetworkInVNet(rangeNumber int) error {
 }
 
 func routeForRangeNetworkInVNetAction(rangeNumber int, present bool) error {
+	if IsContainerMode() || ServerConfiguration.EdgeProxyEnabled {
+		return nil
+	}
 
 	// Edit the /etc/network/if-up.d/sdn-routes file and make sure it contains an ip route command for the range network
 	sdnRoutesFile := "/etc/network/if-up.d/sdn-routes"

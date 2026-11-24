@@ -86,8 +86,8 @@ func (s *Server) InitializePlugins() {
 		embeddedFSsFromPlugin := p.GetEmbeddedFSs()
 		for index, embeddedFSFromPlugin := range embeddedFSsFromPlugin {
 			if embeddedFSFromPlugin != nil {
-				if p.Name() == "Ludus Enterprise" && os.Geteuid() == 0 {
-					logger.Info(fmt.Sprintf("Not dropping files for plugin: %s (root)", p.Name()))
+				if p.Name() == "Ludus Enterprise" && IsAdminProcess() {
+					logger.Info(fmt.Sprintf("Not dropping files for plugin: %s (admin)", p.Name()))
 					continue
 				}
 				logger.Info(fmt.Sprintf("Dropping embedded filesystem %d for plugin: %s", index+1, p.Name()))

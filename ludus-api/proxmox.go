@@ -29,6 +29,45 @@ import (
 // ErrProxmoxVMNotFound is returned by getNodeForVMByName when no cluster VM matches the name.
 var ErrProxmoxVMNotFound = errors.New("proxmox VM not found")
 
+// proxmoxPrincipalFromTokenID extracts the "user@realm" principal prefix from a
+// Proxmox full token ID ("user@realm!tokenname"), falling back to fallbackPrincipal.
+func proxmoxPrincipalFromTokenID(fullTokenID, fallbackPrincipal string) string {
+	if idx := strings.IndexByte(fullTokenID, '!'); idx > 0 {
+		return fullTokenID[:idx]
+	}
+	return fallbackPrincipal
+}
+
+// ResolveProxmoxCredentialsForUser returns (apiUser, fullTokenID, tokenSecret) for
+// runtime Proxmox calls (REST clients, dynamic-inventory, Ansible proxmox_kvm, Packer).
+// In service_token mode all Ludus users share the configured least-privilege service
+// token while retaining isolated per-user workspaces in /opt/ludus/users/<username>.
+func ResolveProxmoxCredentialsForUser(user *models.User) (string, string, string, error) {
+	fallbackPrincipal := ""
+	if user != nil {
+		fallbackPrincipal = user.ProxmoxUsername() + "@" + user.ProxmoxRealm()
+	}
+	if IsProxmoxServiceTokenMode() {
+		ConfigMu.RLock()
+		cfgCopy := ServerConfiguration
+		ConfigMu.RUnlock()
+		if tokenID, tokenSecret, ok, err := ResolveProxmoxServiceToken(&cfgCopy); err != nil {
+			return "", "", "", err
+		} else if ok {
+			return proxmoxPrincipalFromTokenID(tokenID, fallbackPrincipal), tokenID, tokenSecret, nil
+		}
+	}
+	if user == nil {
+		return "", "", "", errors.New("proxmox user is nil")
+	}
+	fullTokenID := user.ProxmoxTokenId()
+	tokenSecret, err := DecryptStringFromDatabase(user.ProxmoxTokenSecret())
+	if err != nil {
+		return "", "", "", errors.New("unable to decrypt proxmox token secret")
+	}
+	return proxmoxPrincipalFromTokenID(fullTokenID, fallbackPrincipal), fullTokenID, tokenSecret, nil
+}
+
 func GetProxmoxClientForUserUsingToken(e *core.RequestEvent) (*proxmox.Client, error) {
 	user := e.Get("user").(*models.User)
 
@@ -36,20 +75,23 @@ func GetProxmoxClientForUserUsingToken(e *core.RequestEvent) (*proxmox.Client, e
 		return nil, errors.New("ROOT user should not be used for this action")
 	}
 
-	tokenSecret, err := DecryptStringFromDatabase(user.ProxmoxTokenSecret())
+	_, tokenID, tokenSecret, err := ResolveProxmoxCredentialsForUser(user)
 	if err != nil {
-		return nil, errors.New("unable to decrypt proxmox token secret")
+		return nil, err
 	}
 
 	proxmoxClient, err := proxmox.NewClient(ServerConfiguration.ProxmoxURL+"/api2/json", nil, "", &tls.Config{InsecureSkipVerify: ServerConfiguration.ProxmoxInvalidCert}, "", 300)
 	if err != nil {
 		return nil, errors.New("unable to create proxmox client: " + err.Error())
 	}
-	proxmoxClient.SetAPIToken(user.ProxmoxTokenId(), tokenSecret)
+	proxmoxClient.SetAPIToken(tokenID, tokenSecret)
 	return proxmoxClient, nil
 }
 
 func setProxmoxSystemPassword(username string, realm string, password string, oldPassword ...string) error {
+	if IsProxmoxServiceTokenMode() {
+		return nil
+	}
 	var prevPw string
 	if len(oldPassword) > 0 {
 		prevPw = oldPassword[0]
@@ -113,10 +155,9 @@ func GetGoProxmoxClientForUserUsingToken(e *core.RequestEvent) (*goproxmox.Clien
 		return nil, errors.New("ROOT user should not be used for this action")
 	}
 
-	tokenID := user.ProxmoxTokenId()
-	tokenSecret, err := DecryptStringFromDatabase(user.ProxmoxTokenSecret())
+	_, tokenID, tokenSecret, err := ResolveProxmoxCredentialsForUser(user)
 	if err != nil {
-		return nil, errors.New("unable to decrypt proxmox token secret")
+		return nil, err
 	}
 
 	insecureHTTPClient := http.Client{
@@ -145,26 +186,41 @@ func GetGoProxmoxClientForUserUsingToken(e *core.RequestEvent) (*goproxmox.Clien
 }
 
 func GetRootGoProxmoxClient() (*goproxmox.Client, error) {
-	if app == nil {
-		return nil, errors.New("PocketBase app is not initialized")
+	if app != nil {
+		rawCachedClient := app.Store().Get("proxmoxClient_root")
+		if cachedClient, ok := rawCachedClient.(*goproxmox.Client); ok {
+			return cachedClient, nil
+		}
 	}
 
-	rawCachedClient := app.Store().Get("proxmoxClient_root")
-	cachedClient, ok := rawCachedClient.(*goproxmox.Client)
-	if ok {
-		return cachedClient, nil
+	var tokenID, tokenSecret string
+	if IsProxmoxServiceTokenMode() {
+		ConfigMu.RLock()
+		cfgCopy := ServerConfiguration
+		ConfigMu.RUnlock()
+		if resolvedID, resolvedSecret, ok, err := ResolveProxmoxServiceToken(&cfgCopy); err != nil {
+			return nil, err
+		} else if ok {
+			tokenID = resolvedID
+			tokenSecret = resolvedSecret
+		}
 	}
 
-	rootUserRecord, err := app.FindFirstRecordByData("users", "userID", "ROOT")
-	if err != nil {
-		return nil, errors.New("unable to get root user object: " + err.Error())
-	}
-	rootUserObject := &models.User{}
-	rootUserObject.SetProxyRecord(rootUserRecord)
-	tokenID := rootUserObject.ProxmoxTokenId()
-	tokenSecret, err := DecryptStringFromDatabase(rootUserObject.ProxmoxTokenSecret())
-	if err != nil {
-		return nil, errors.New("unable to decrypt proxmox token secret for root user: " + err.Error())
+	if tokenID == "" {
+		if app == nil {
+			return nil, errors.New("PocketBase app is not initialized")
+		}
+		rootUserRecord, err := app.FindFirstRecordByData("users", "userID", "ROOT")
+		if err != nil {
+			return nil, errors.New("unable to get root user object: " + err.Error())
+		}
+		rootUserObject := &models.User{}
+		rootUserObject.SetProxyRecord(rootUserRecord)
+		tokenID = rootUserObject.ProxmoxTokenId()
+		tokenSecret, err = DecryptStringFromDatabase(rootUserObject.ProxmoxTokenSecret())
+		if err != nil {
+			return nil, errors.New("unable to decrypt proxmox token secret for root user: " + err.Error())
+		}
 	}
 	insecureHTTPClient := http.Client{
 		Transport: &http.Transport{
@@ -187,11 +243,26 @@ func GetRootGoProxmoxClient() (*goproxmox.Client, error) {
 		goproxmox.WithLogger(customLogger),
 	)
 
-	app.Store().Set("proxmoxClient_root", client)
+	if app != nil {
+		app.Store().Set("proxmoxClient_root", client)
+	}
 	return client, nil
 }
 
 func createProxmoxAPITokenForUserWithoutContext(username string, userRealm string, proxmoxPassword string) (string, string, error) {
+	if IsProxmoxServiceTokenMode() {
+		ConfigMu.RLock()
+		cfgCopy := ServerConfiguration
+		ConfigMu.RUnlock()
+		tokenID, tokenSecret, ok, err := ResolveProxmoxServiceToken(&cfgCopy)
+		if err != nil {
+			return "", "", err
+		}
+		if !ok {
+			return "", "", errors.New("proxmox_auth_mode is service_token, but proxmox_api_token_id / proxmox_api_token_file is not configured")
+		}
+		return tokenID, tokenSecret, nil
+	}
 	if userRealm == "" {
 		userRealm = ConfiguredProxmoxRealm()
 	}
@@ -270,10 +341,13 @@ func createProxmoxAPITokenForUserWithClient(proxmoxClient *goproxmox.Client, use
 }
 
 func createRootAPIToken() (string, string, error) {
-	if ServerConfiguration.RemoteProxmox ||
+	if IsProxmoxServiceTokenMode() ||
+		ServerConfiguration.RemoteProxmox ||
+		strings.TrimSpace(ServerConfiguration.ProxmoxAPITokenID) != "" ||
 		strings.TrimSpace(ServerConfiguration.ProxmoxRootTokenID) != "" ||
 		strings.TrimSpace(ServerConfiguration.ProxmoxAdminPasswordFile) != "" ||
 		os.Getenv("LUDUS_PROXMOX_ADMIN_PASSWORD") != "" ||
+		os.Getenv("LUDUS_PROXMOX_API_TOKEN_ID") != "" ||
 		os.Getenv("LUDUS_PROXMOX_ROOT_TOKEN_ID") != "" {
 		return createRootAPITokenViaAPI(&ServerConfiguration)
 	}
@@ -344,6 +418,9 @@ func removePool(poolName string) error {
 }
 
 func giveUserAccessToRange(username string, realm string, poolName string, rangeNumber int) error {
+	if IsProxmoxServiceTokenMode() {
+		return nil
+	}
 	if UseSDN {
 		if err := sdnVNetACLAction(username, realm, rangeNumber, false); err != nil {
 			return err
@@ -353,6 +430,9 @@ func giveUserAccessToRange(username string, realm string, poolName string, range
 }
 
 func removeUserAccessFromRange(username string, realm string, poolName string, rangeNumber int) error {
+	if IsProxmoxServiceTokenMode() {
+		return nil
+	}
 	if UseSDN {
 		if err := sdnVNetACLAction(username, realm, rangeNumber, true); err != nil {
 			return err
@@ -430,6 +510,9 @@ func createGroupInProxmox(groupName string) error {
 	if !proxmoxGroupNameRegex.MatchString(groupName) {
 		return errors.New("group name must be alphanumeric, hyphens, and underscores only")
 	}
+	if IsProxmoxServiceTokenMode() {
+		return nil
+	}
 
 	proxmoxClient, err := GetRootGoProxmoxClient()
 	if err != nil {
@@ -443,6 +526,9 @@ func createGroupInProxmox(groupName string) error {
 }
 
 func removeGroupFromProxmox(groupName string) error {
+	if IsProxmoxServiceTokenMode() {
+		return nil
+	}
 	proxmoxClient, err := GetRootGoProxmoxClient()
 	if err != nil {
 		return errors.New("unable to create proxmox client: " + err.Error())
@@ -459,6 +545,9 @@ func removeGroupFromProxmox(groupName string) error {
 }
 
 func addUserToGroupInProxmox(username string, realm string, groupName string) error {
+	if IsProxmoxServiceTokenMode() {
+		return nil
+	}
 	proxmoxClient, err := GetRootGoProxmoxClient()
 	if err != nil {
 		return errors.New("unable to create proxmox client: " + err.Error())
@@ -488,6 +577,9 @@ func addUserToGroupInProxmox(username string, realm string, groupName string) er
 }
 
 func removeUserFromGroupInProxmox(username string, realm string, groupName string) error {
+	if IsProxmoxServiceTokenMode() {
+		return nil
+	}
 	proxmoxClient, err := GetRootGoProxmoxClient()
 	if err != nil {
 		return errors.New("unable to create proxmox client: " + err.Error())
@@ -520,6 +612,9 @@ func removeUserFromGroupInProxmox(username string, realm string, groupName strin
 }
 
 func grantGroupAccessToRangeInProxmox(groupID string, poolName string, rangeNumber int) error {
+	if IsProxmoxServiceTokenMode() {
+		return nil
+	}
 	if UseSDN {
 		if err := grantGroupAccessToSDNVNet(groupID, rangeNumber); err != nil {
 			return err
@@ -529,6 +624,9 @@ func grantGroupAccessToRangeInProxmox(groupID string, poolName string, rangeNumb
 }
 
 func revokeGroupAccessToRangeInProxmox(groupID string, poolName string, rangeNumber int) error {
+	if IsProxmoxServiceTokenMode() {
+		return nil
+	}
 	if UseSDN {
 		if err := revokeGroupAccessToSDNVNet(groupID, rangeNumber); err != nil {
 			return err
@@ -561,6 +659,9 @@ func groupACLAction(groupID string, poolName string, revoke bool) error {
 }
 
 func removeUserFromProxmox(username string, realm string) error {
+	if IsProxmoxServiceTokenMode() {
+		return nil
+	}
 	proxmoxClient, err := GetRootGoProxmoxClient()
 	if err != nil {
 		return errors.New("unable to create proxmox client: " + err.Error())

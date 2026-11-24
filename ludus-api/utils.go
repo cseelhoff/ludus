@@ -443,6 +443,9 @@ func getUIDandGIDFromUsername(username string) (int, int, error) {
 
 // userExistsOnHostSystem checks if a user exists on the host system
 func userExistsOnHostSystem(username string) bool {
+	if IsContainerMode() {
+		return false
+	}
 	shellEscapedUsername := shellescape.Quote(username)
 	cmd := exec.Command("/usr/bin/id", shellEscapedUsername)
 	return cmd.Run() == nil
@@ -450,6 +453,9 @@ func userExistsOnHostSystem(username string) bool {
 
 // removeUserFromHostSystem removes a user from the host system
 func removeUserFromHostSystem(username string) error {
+	if IsContainerMode() {
+		return nil
+	}
 	shellEscapedUsername := shellescape.Quote(username)
 	cmd := exec.Command("/usr/sbin/userdel", "-r", shellEscapedUsername)
 	err := cmd.Run()

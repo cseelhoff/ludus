@@ -128,6 +128,9 @@ func checkConfig() {
 	if remoteProxmoxFlag {
 		config.RemoteProxmox = true
 	}
+	if containerFlag || containerMode {
+		config.ContainerMode = true
+	}
 	config.ApplyRemoteProxmoxDefaults()
 
 	if err := config.ApplyPortDefaultsAndValidate(); err != nil {

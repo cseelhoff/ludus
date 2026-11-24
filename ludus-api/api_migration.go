@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"ludusapi/dto"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
@@ -105,7 +104,7 @@ func GetSDNMigrationStatus(e *core.RequestEvent) error {
 // All operations use the Proxmox API for portability
 // This is only applicable to cluster mode - non-cluster hosts use vmbr management
 func MigrateToSDN(e *core.RequestEvent) error {
-	if os.Geteuid() != 0 {
+	if !IsAdminProcess() {
 		return JSONError(e, http.StatusForbidden, fmt.Sprintf("Migration must be run via ludus-admin on 127.0.0.1:%d", ServerConfiguration.AdminPort))
 	}
 
@@ -273,7 +272,7 @@ func migrateRangeVMsToVNet(client *goproxmox.Client, ctx context.Context, rangeI
 // This is used during fresh installations in cluster mode.
 // Non-cluster hosts skip this and use vmbr management.
 func SetupSDNInfrastructure(e *core.RequestEvent) error {
-	if os.Geteuid() != 0 {
+	if !IsAdminProcess() {
 		return JSONError(e, http.StatusForbidden, fmt.Sprintf("SDN setup must be run via ludus-admin on 127.0.0.1:%d", ServerConfiguration.AdminPort))
 	}
 

@@ -68,7 +68,7 @@ func serve() {
 
 	// Load plugins
 	var pluginsDir string
-	if os.Geteuid() == 0 {
+	if ludusapi.IsAdminProcess() {
 		pluginsDir = fmt.Sprintf("%s/plugins/community/admin", ludusInstallPath)
 	} else {
 		pluginsDir = fmt.Sprintf("%s/plugins/community/", ludusInstallPath)
@@ -100,38 +100,44 @@ func serve() {
 	// Register plugin routes
 	server.RegisterPluginRoutes(app)
 
-	// When a user uploads their own certificate to proxmox, it gets saved as pveproxy-ssl.pem and pveproxy-ssl.key in the /etc/pve/nodes/<node>/ directory.
-	// If these files exist, use them instead of the proxmox CA signed certs (pve-ssl.pem and pve-ssl.key), and only fall back to our own self signed certs if both are missing.
-	certPath := "/etc/pve/nodes/" + config.ProxmoxNode + "/pveproxy-ssl.pem"
-	keyPath := "/etc/pve/nodes/" + config.ProxmoxNode + "/pveproxy-ssl.key"
-
-	// Check if the pveproxy-ssl.pem and pveproxy-ssl.key files exist and we can read them. If not, use the proxmox CA signed certs.
-	if !fileExists(certPath) || !fileExists(keyPath) {
-		certPath = "/etc/pve/nodes/" + config.ProxmoxNode + "/pve-ssl.pem"
-		keyPath = "/etc/pve/nodes/" + config.ProxmoxNode + "/pve-ssl.key"
-	}
-
-	// Check if the pve-ssl.pem and pve-ssl.key files exist and we can read them. If not, generate our own self signed certs.
-	if !fileExists(certPath) || !fileExists(keyPath) {
-		log.Println("Could not find/read " + certPath + " or " + keyPath)
-		generateSelfSignedCert()
-		certPath = "/opt/ludus/cert.pem"
-		keyPath = "/opt/ludus/key.pem"
-	}
-
-	// Setup the server to use the certificate/key found above
+	// Setup the server listener (HTTPS by default, or plain HTTP behind a reverse proxy when tls_enabled: false)
 	serveConfig := apis.ServeConfig{
 		ShowStartBanner: false,
 		AllowedOrigins:  []string{"*"},
 	}
 	ludusApp := *app
-	ludusApp.OnServe().BindFunc(func(e *core.ServeEvent) error {
-		certificate, err := tls.LoadX509KeyPair(certPath, keyPath)
-		if err != nil {
-			return err
+	tlsEnabled := config.IsTLSEnabled()
+	var certPath, keyPath string
+	if tlsEnabled {
+		// When a user uploads their own certificate to proxmox, it gets saved as pveproxy-ssl.pem and pveproxy-ssl.key in the /etc/pve/nodes/<node>/ directory.
+		// If these files exist, use them instead of the proxmox CA signed certs (pve-ssl.pem and pve-ssl.key), and only fall back to our own self signed certs if both are missing.
+		certPath = "/etc/pve/nodes/" + config.ProxmoxNode + "/pveproxy-ssl.pem"
+		keyPath = "/etc/pve/nodes/" + config.ProxmoxNode + "/pveproxy-ssl.key"
+
+		// Check if the pveproxy-ssl.pem and pveproxy-ssl.key files exist and we can read them. If not, use the proxmox CA signed certs.
+		if !fileExists(certPath) || !fileExists(keyPath) {
+			certPath = "/etc/pve/nodes/" + config.ProxmoxNode + "/pve-ssl.pem"
+			keyPath = "/etc/pve/nodes/" + config.ProxmoxNode + "/pve-ssl.key"
 		}
-		e.Server.TLSConfig = &tls.Config{
-			Certificates: []tls.Certificate{certificate},
+
+		// Check if the pve-ssl.pem and pve-ssl.key files exist and we can read them. If not, generate our own self signed certs.
+		if !fileExists(certPath) || !fileExists(keyPath) {
+			log.Println("Could not find/read " + certPath + " or " + keyPath)
+			generateSelfSignedCert()
+			certPath = "/opt/ludus/cert.pem"
+			keyPath = "/opt/ludus/key.pem"
+		}
+	}
+
+	ludusApp.OnServe().BindFunc(func(e *core.ServeEvent) error {
+		if tlsEnabled {
+			certificate, err := tls.LoadX509KeyPair(certPath, keyPath)
+			if err != nil {
+				return err
+			}
+			e.Server.TLSConfig = &tls.Config{
+				Certificates: []tls.Certificate{certificate},
+			}
 		}
 		// PocketBase defaults to 5 min Read/WriteTimeout; extend for long-running requests (e.g. antisandbox enable)
 		e.Server.ReadTimeout = 30 * time.Minute
@@ -139,23 +145,22 @@ func serve() {
 		return e.Next()
 	})
 
-	// If we're running as a non-root user, bind to all interfaces, else (running as root) bind to localhost unless the user has opted to expose the admin API globally
-	if os.Geteuid() != 0 {
-		serveConfig.HttpsAddr = fmt.Sprintf("0.0.0.0:%d", config.Port)
-		logger.Debug("Starting server on " + serveConfig.HttpsAddr)
-		if err := apis.Serve(ludusApp, serveConfig); err != nil {
-			logger.Error(fmt.Sprintf("Failed to start the server: %v", err))
-		}
+	var listenAddr string
+	if !ludusapi.IsAdminProcess() {
+		listenAddr = fmt.Sprintf("0.0.0.0:%d", config.Port)
+	} else if config.ExposeAdminPort {
+		listenAddr = fmt.Sprintf("0.0.0.0:%d", config.AdminPort)
 	} else {
-		if config.ExposeAdminPort {
-			serveConfig.HttpsAddr = fmt.Sprintf("0.0.0.0:%d", config.AdminPort)
-		} else {
-			serveConfig.HttpsAddr = fmt.Sprintf("127.0.0.1:%d", config.AdminPort)
-		}
-		logger.Debug("Starting server on " + serveConfig.HttpsAddr)
-		if err := apis.Serve(ludusApp, serveConfig); err != nil {
-			logger.Error(fmt.Sprintf("Failed to start the server: %v", err))
-		}
+		listenAddr = fmt.Sprintf("127.0.0.1:%d", config.AdminPort)
+	}
+	if tlsEnabled {
+		serveConfig.HttpsAddr = listenAddr
+	} else {
+		serveConfig.HttpAddr = listenAddr
+	}
+	logger.Debug("Starting server on " + listenAddr)
+	if err := apis.Serve(ludusApp, serveConfig); err != nil {
+		logger.Error(fmt.Sprintf("Failed to start the server: %v", err))
 	}
 	server.Scheduler.Stop()
 	server.ShutdownPlugins()
@@ -188,6 +193,28 @@ func main() {
 
 	// Sanity checks
 	checkArgs()
+	if adminServerFlag && userServerFlag {
+		log.Fatal("--admin and --user-server are mutually exclusive")
+	}
+	if adminServerFlag {
+		ludusapi.SetAdminProcess(true)
+	} else if userServerFlag {
+		ludusapi.SetAdminProcess(false)
+	}
+
+	containerMode = detectContainerMode()
+	if containerMode {
+		remoteProxmoxMode = true
+		if !adminServerFlag && !userServerFlag {
+			runContainerSupervisor()
+			return
+		}
+		checkConfig()
+		inCluster = isInCluster()
+		serve()
+		return
+	}
+
 	remoteProxmoxMode = detectRemoteProxmoxMode()
 	checkDebian12or13()
 	if !remoteProxmoxMode {

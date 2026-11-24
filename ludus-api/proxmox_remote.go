@@ -57,6 +57,10 @@ func normalizeProxmoxAPIBase(rawURL string) string {
 // readSecretFileStrict reads a secret file, trimming trailing CR/LF characters.
 // On Unix systems when running as root, it rejects group/world-accessible files.
 func readSecretFileStrict(path string) (string, error) {
+	return readSecretFile(path, IsContainerMode())
+}
+
+func readSecretFile(path string, allowContainerMount bool) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", err
@@ -64,7 +68,7 @@ func readSecretFileStrict(path string) (string, error) {
 	if info.IsDir() {
 		return "", fmt.Errorf("secret path %s is a directory, expected file", path)
 	}
-	if runtime.GOOS != "windows" {
+	if runtime.GOOS != "windows" && !allowContainerMount && !strings.HasPrefix(path, "/run/secrets/") {
 		if info.Mode().Perm()&0o077 != 0 {
 			return "", fmt.Errorf("secret file %s has overly broad permissions (%#o); expected 0600 or 0400", path, info.Mode().Perm())
 		}
@@ -111,7 +115,7 @@ func ResolvePreprovisionedRootToken(cfg *Configuration) (string, string, bool, e
 		return "", "", false, nil
 	}
 	if tokenFile := strings.TrimSpace(cfg.ProxmoxRootTokenFile); tokenFile != "" {
-		secret, err := readSecretFileStrict(tokenFile)
+		secret, err := readSecretFile(tokenFile, cfg.ContainerMode)
 		if err != nil {
 			return "", "", false, fmt.Errorf("reading proxmox_root_token_file: %w", err)
 		}
@@ -121,6 +125,36 @@ func ResolvePreprovisionedRootToken(cfg *Configuration) (string, string, bool, e
 		return tokenID, envSecret, true, nil
 	}
 	return "", "", false, fmt.Errorf("proxmox_root_token_id (%s) is set, but proxmox_root_token_file / LUDUS_PROXMOX_ROOT_TOKEN_SECRET is missing", tokenID)
+}
+
+// ResolveProxmoxServiceToken resolves the shared Proxmox API token used in
+// proxmox_auth_mode: "service_token" (checking proxmox_api_token_id/file first,
+// LUDUS_PROXMOX_API_TOKEN_ID/SECRET second, and proxmox_root_token_* as an alias).
+func ResolveProxmoxServiceToken(cfg *Configuration) (string, string, bool, error) {
+	if cfg == nil {
+		return "", "", false, nil
+	}
+	tokenID := strings.TrimSpace(cfg.ProxmoxAPITokenID)
+	if tokenID == "" {
+		tokenID = strings.TrimSpace(os.Getenv("LUDUS_PROXMOX_API_TOKEN_ID"))
+	}
+	if tokenID != "" {
+		if !strings.Contains(tokenID, "!") {
+			return "", "", false, fmt.Errorf("proxmox_api_token_id %q must be formatted as user@realm!tokenname", tokenID)
+		}
+		if tokenFile := strings.TrimSpace(cfg.ProxmoxAPITokenFile); tokenFile != "" {
+			secret, err := readSecretFile(tokenFile, cfg.ContainerMode)
+			if err != nil {
+				return "", "", false, fmt.Errorf("reading proxmox_api_token_file: %w", err)
+			}
+			return tokenID, secret, true, nil
+		}
+		if envSecret := strings.TrimSpace(os.Getenv("LUDUS_PROXMOX_API_TOKEN_SECRET")); envSecret != "" {
+			return tokenID, envSecret, true, nil
+		}
+		return "", "", false, fmt.Errorf("proxmox_api_token_id (%s) is set, but proxmox_api_token_file / LUDUS_PROXMOX_API_TOKEN_SECRET is missing", tokenID)
+	}
+	return ResolvePreprovisionedRootToken(cfg)
 }
 
 // NewProxmoxTicketClient authenticates against POST /api2/json/access/ticket with
@@ -203,10 +237,17 @@ func NewProxmoxBestEffortAdminClient(ctx context.Context, cfg *Configuration) (*
 	if cfg == nil {
 		cfg = &ServerConfiguration
 	}
+	if cfg.IsServiceTokenAuthMode() {
+		if tokenID, secret, ok, err := ResolveProxmoxServiceToken(cfg); err != nil {
+			return nil, err
+		} else if ok {
+			return NewProxmoxAPITokenClient(cfg.ProxmoxURL, cfg.ProxmoxInvalidCert, tokenID, secret), nil
+		}
+	}
 	if client, err := NewProxmoxAdminTicketClient(ctx, cfg); err == nil {
 		return client, nil
 	}
-	if tokenID, secret, ok, err := ResolvePreprovisionedRootToken(cfg); err != nil {
+	if tokenID, secret, ok, err := ResolveProxmoxServiceToken(cfg); err != nil {
 		return nil, err
 	} else if ok {
 		return NewProxmoxAPITokenClient(cfg.ProxmoxURL, cfg.ProxmoxInvalidCert, tokenID, secret), nil
@@ -222,7 +263,7 @@ func NewProxmoxBestEffortAdminClient(ctx context.Context, cfg *Configuration) (*
 			}
 		}
 	}
-	return nil, errors.New("no Proxmox admin credentials available (configure proxmox_admin_password_file or proxmox_root_token_id/proxmox_root_token_file)")
+	return nil, errors.New("no Proxmox admin credentials available (configure proxmox_api_token_id/proxmox_api_token_file or proxmox_admin_password_file)")
 }
 
 // Do executes an authenticated Proxmox REST API call and optionally decodes response.data into out.
@@ -352,15 +393,18 @@ func createRootAPITokenViaAPI(cfg *Configuration) (string, string, error) {
 		cfg = &ServerConfiguration
 	}
 
-	if tokenID, tokenSecret, ok, err := ResolvePreprovisionedRootToken(cfg); err != nil {
+	if tokenID, tokenSecret, ok, err := ResolveProxmoxServiceToken(cfg); err != nil {
 		return "", "", err
 	} else if ok {
 		tokenClient := NewProxmoxAPITokenClient(cfg.ProxmoxURL, cfg.ProxmoxInvalidCert, tokenID, tokenSecret)
 		var ver map[string]interface{}
 		if err := tokenClient.Do(ctx, http.MethodGet, "/version", nil, &ver); err != nil {
-			return "", "", fmt.Errorf("validating pre-provisioned proxmox_root_token_id %s: %w", tokenID, err)
+			return "", "", fmt.Errorf("validating configured Proxmox API token %s: %w", tokenID, err)
 		}
 		return tokenID, tokenSecret, nil
+	}
+	if cfg.IsServiceTokenAuthMode() {
+		return "", "", errors.New("proxmox_auth_mode is service_token, but proxmox_api_token_id / proxmox_api_token_file is not configured")
 	}
 
 	client, err := NewProxmoxAdminTicketClient(ctx, cfg)

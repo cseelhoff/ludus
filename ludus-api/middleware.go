@@ -70,7 +70,7 @@ func updateLastActiveTimeAndLog(e *core.RequestEvent) error {
 	// Prevent locking issues with proxied requests, don't log the last active time for ludus-admin requests
 	// as they are already logged by the regular ludus service proxy
 	// Also skip logging for requests to the PocketBase web UI or unauthenticated requests
-	if os.Geteuid() == 0 || e.Auth == nil || e.Get("user") == nil || e.Auth.IsSuperuser() {
+	if IsAdminProcess() || e.Auth == nil || e.Get("user") == nil || e.Auth.IsSuperuser() {
 		return e.Next()
 	}
 
@@ -192,7 +192,7 @@ func userAndRangesLookupMiddleware(e *core.RequestEvent) error {
 // This function makes sure the request is to a user endpoint if the server is running as root (i.e. the admin port)
 func limitRootEndpoints(e *core.RequestEvent) error {
 	logger.Debug(fmt.Sprintf("Request: %s %s", e.Request.Method, e.Request.URL.Path))
-	if os.Geteuid() == 0 &&
+	if IsAdminProcess() &&
 		!strings.HasPrefix(e.Request.URL.Path, APIBasePath+"/user") &&
 		!strings.HasPrefix(e.Request.URL.Path, APIBasePath+"/antisandbox/") &&
 		!strings.HasPrefix(e.Request.URL.Path, APIBasePath+"/ranges/create") &&
@@ -201,7 +201,7 @@ func limitRootEndpoints(e *core.RequestEvent) error {
 		!strings.HasPrefix(e.Request.URL.Path, APIBasePath+"/diagnostics") &&
 		!strings.HasPrefix(e.Request.URL.Path, APIBasePath+"/migrate/") {
 		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("The :%d endpoint can only be used for user, range creation/deletion, migrations, and anti-sandbox actions. Use the :%d endpoint for all other actions.", ServerConfiguration.AdminPort, ServerConfiguration.Port))
-	} else if os.Geteuid() != 0 &&
+	} else if !IsAdminProcess() &&
 		(strings.HasPrefix(e.Request.URL.Path, APIBasePath+"/user") ||
 			strings.HasPrefix(e.Request.URL.Path, APIBasePath+"/antisandbox/") ||
 			strings.HasPrefix(e.Request.URL.Path, APIBasePath+"/ranges/create") ||
@@ -248,7 +248,7 @@ func limitRootEndpoints(e *core.RequestEvent) error {
 
 // auth is only bypassed when all three conditions are met: exact path match, root process, localhost origin. Every other request on the admin API still requires authentication.
 func isInternalProvisionRequest(e *core.RequestEvent) bool {
-	if e.Request.URL.Path != APIBasePath+"/user/provision-oauth2" || os.Geteuid() != 0 {
+	if e.Request.URL.Path != APIBasePath+"/user/provision-oauth2" || !IsAdminProcess() {
 		return false
 	}
 	host, _, err := net.SplitHostPort(e.Request.RemoteAddr)

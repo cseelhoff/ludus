@@ -37,7 +37,7 @@ type initialAdminYAML struct {
 var reservedInitialAdminUserIDs = []string{"ADMIN", "ROOT", "CICD", "SHARED", "0"}
 
 func InitDb() {
-	if os.Geteuid() == 0 {
+	if IsAdminProcess() {
 		// Make sure the db path is owned by the ludus user
 		chownDirToUsernameRecursive(ServerConfiguration.DataDirectory, "ludus")
 
@@ -75,7 +75,9 @@ func writeInitialAdminError(err error) {
 		logger.Error(fmt.Sprintf("Failed to write initial-admin-error: %v", writeErr))
 		return
 	}
-	os.Chown(initialAdminErrorPath, 0, 0)
+	if os.Geteuid() == 0 && !IsContainerMode() {
+		os.Chown(initialAdminErrorPath, 0, 0)
+	}
 }
 
 func createRootUserInDatabase() {
@@ -124,14 +126,19 @@ func createRootUserInDatabase() {
 
 	logger.Info("Writing root API key to: " + fmt.Sprintf("%s/install/root-api-key", ludusInstallPath))
 	apiKey := GenerateAPIKey(user.UserId())
-	err = os.WriteFile(fmt.Sprintf("%s/install/root-api-key", ludusInstallPath), []byte(apiKey), 0400)
+	rootKeyPerm := os.FileMode(0400)
+	if IsContainerMode() {
+		rootKeyPerm = 0600
+	}
+	err = os.WriteFile(fmt.Sprintf("%s/install/root-api-key", ludusInstallPath), []byte(apiKey), rootKeyPerm)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
-	err = os.Chown(fmt.Sprintf("%s/install/root-api-key", ludusInstallPath), 0, 0)
-	if err != nil {
-		logger.Error(fmt.Sprintf("Error chowning root API key: %v", err))
-
+	if os.Geteuid() == 0 && !IsContainerMode() {
+		err = os.Chown(fmt.Sprintf("%s/install/root-api-key", ludusInstallPath), 0, 0)
+		if err != nil {
+			logger.Error(fmt.Sprintf("Error chowning root API key: %v", err))
+		}
 	}
 	tokenID, tokenSecret, err := createRootAPIToken()
 	if err != nil {
@@ -278,7 +285,7 @@ func createInitialAdminFromFile(initialAdminPath string) error {
 			return fmt.Errorf("running add-user playbook: %w (output: %s)", err, output)
 		}
 
-		if ServerConfiguration.RemoteProxmox || user.ProxmoxRealm() != "pam" {
+		if !IsProxmoxServiceTokenMode() && (ServerConfiguration.RemoteProxmox || user.ProxmoxRealm() != "pam") {
 			if err := ensureProxmoxUserAndACLsViaAPI(
 				&ServerConfiguration,
 				user.ProxmoxUsername(),
@@ -316,7 +323,7 @@ func createInitialAdminFromFile(initialAdminPath string) error {
 
 		// Grant user and ludus_admins Proxmox pool/SDN access to the user's default range
 		// (required for range deployment, especially SDN.Use in cluster mode)
-		if user.DefaultRangeId() != "" {
+		if user.DefaultRangeId() != "" && !IsProxmoxServiceTokenMode() {
 			if err := GrantUserProxmoxAccessToDefaultRange(txApp, user); err != nil {
 				wasError = true
 				return fmt.Errorf("granting Proxmox access to default range: %w", err)
@@ -334,7 +341,7 @@ func createInitialAdminFromFile(initialAdminPath string) error {
 		if err := os.WriteFile(initialAdminUserIDPath, []byte(user.UserId()), 0600); err != nil {
 			logger.Error(fmt.Sprintf("Failed to write initial-admin-userid: %v", err))
 			// non-fatal: initial admin user was still created
-		} else {
+		} else if os.Geteuid() == 0 && !IsContainerMode() {
 			os.Chown(initialAdminUserIDPath, 0, 0)
 		}
 
@@ -353,7 +360,9 @@ func createInitialAdminFromFile(initialAdminPath string) error {
 		}
 	}
 	logger.Info("Successfully created initial admin user")
-	Run("ludus-install-status", "/tmp", "/tmp/ludus-install-status.log")
+	if !IsContainerMode() {
+		Run("ludus-install-status", "/tmp", "/tmp/ludus-install-status.log")
+	}
 	return nil
 }
 

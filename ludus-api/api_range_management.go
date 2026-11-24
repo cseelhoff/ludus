@@ -188,7 +188,7 @@ func deleteRangeResources(targetRange *models.Range, force bool, e *core.Request
 // DeleteRange - deletes a range object from the database and proxmox host
 func DeleteRange(e *core.RequestEvent) error {
 
-	if os.Geteuid() != 0 {
+	if !IsAdminProcess() {
 		return JSONError(e, http.StatusForbidden, adminEndpointError("ludus range rm"))
 	}
 
@@ -628,9 +628,9 @@ func GetAnsibleInventoryForRange(e *core.RequestEvent) error {
 	}
 	targetUser := e.Get("user").(*models.User)
 
-	proxmoxTokenSecret, err := DecryptStringFromDatabase(targetUser.ProxmoxTokenSecret())
+	proxmoxAPIUser, proxmoxTokenID, proxmoxTokenSecret, err := ResolveProxmoxCredentialsForUser(targetUser)
 	if err != nil {
-		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Could not decrypt proxmox token secret: %s", err))
+		return JSONError(e, http.StatusInternalServerError, fmt.Sprintf("Could not resolve proxmox credentials: %s", err))
 	}
 
 	// Check for allranges parameter
@@ -643,8 +643,8 @@ func GetAnsibleInventoryForRange(e *core.RequestEvent) error {
 	cmd.Env = append(cmd.Env, fmt.Sprintf("PROXMOX_INVALID_CERT=%s", strconv.FormatBool(ServerConfiguration.ProxmoxInvalidCert)))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("PROXMOX_URL=%s", ServerConfiguration.ProxmoxURL))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("PROXMOX_HOSTNAME=%s", ServerConfiguration.ProxmoxHostname))
-	cmd.Env = append(cmd.Env, fmt.Sprintf("PROXMOX_USERNAME=%s", targetUser.ProxmoxUsername()+"@"+targetUser.ProxmoxRealm()))
-	cmd.Env = append(cmd.Env, fmt.Sprintf("PROXMOX_TOKEN=%s", targetUser.ProxmoxTokenId()))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("PROXMOX_USERNAME=%s", proxmoxAPIUser))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("PROXMOX_TOKEN=%s", proxmoxTokenID))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("PROXMOX_SECRET=%s", proxmoxTokenSecret))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("LUDUS_RANGE_CONFIG=%s/ranges/%s/range-config.yml", ludusInstallPath, targetRange.RangeId()))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("LUDUS_RANGE_NUMBER=%s", strconv.Itoa(int(targetRange.RangeNumber()))))
@@ -724,8 +724,8 @@ func AbortAnsible(e *core.RequestEvent) error {
 // CreateRange allows users to create ranges not tied to a specific user
 func CreateRange(e *core.RequestEvent) error {
 
-	// Make sure this is the admin server (root) as we need to create a vmbr interface for the range
-	if os.Geteuid() != 0 {
+	// Make sure this is the admin server as we need to create a range network / pool
+	if !IsAdminProcess() {
 		return JSONError(e, http.StatusForbidden, adminEndpointError("ludus range create"))
 	}
 
