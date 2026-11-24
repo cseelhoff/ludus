@@ -95,26 +95,26 @@
 ### Phase 5 — Build & Publish OCI Images + Embedded `ludus-edge.iso` (`registry-push.<domain>` & `ghcr.io/cseelhoff`)
 *Goal: Build immutable rootless-Podman OCI images (`ludus-server` bundling secret-free `/opt/ludus/resources/ludus-edge.iso`, and `lux`) and publish them to Sophon Nexus (`registry-push.<domain>`) and GHCR (`ghcr.io/cseelhoff`) prior to Compose deployment.*
 
-- [ ] **5.1 Secret-Free Alpine `ludus-edge.iso` Builder Stage (`docker/edge-iso/`):**
+- [x] **5.1 Secret-Free Alpine `ludus-edge.iso` Builder Stage (`docker/edge-iso/`):**
   - Follow Sophon's signed-repo Alpine `Containerfile` + deterministic `localhost.apkovl.tar.gz` + `xorriso` pattern (`dnsmasq`, `nftables`, `wireguard-tools`, `ludus-edge-proxy`, 153 static `10.<N>.0.0/16` routes, Cloud-Init `cidata` network/enrollment reader) producing `/opt/ludus/resources/ludus-edge.iso`.
-- [ ] **5.2 Multi-Stage `Containerfile.ludus` & `lux` `Dockerfile` (`docker/Containerfile.ludus`, `cseelhoff/ludus-ux/Dockerfile`):**
-  - `ludus-server` image (`debian:trixie-slim`, non-root `USER 1000:1000`): static `dynamic-inventory` + `ludus-server`, `/opt/ludus/resources/ludus-edge.iso`, `python3`, `ansible-core`, `proxmoxer`, `pywinrm`, `netaddr`, `dnspython`, `jmespath`, `sshpass`, `openssh-client`, `proxychains4`, `git`, `jq`, `curl`, `tini`, HashiCorp `packer` `1.9.4` + plugins, and pre-baked `/opt/ludus/resources/ansible-cache`.
-  - `lux` image (`node:22-alpine` standalone Next.js build, non-root `USER 1001:1001`).
-- [ ] **5.3 Dual-Registry Build & Push Pipeline (`docker/build-and-push.sh` + `.github/workflows/container-images.yml`):**
+- [x] **5.2 Multi-Stage `Containerfile.ludus` & `lux` `Dockerfile` (`docker/Containerfile.ludus`, `cseelhoff/ludus-ux/docker/Dockerfile`):**
+  - `ludus-server` image (`debian:bookworm-slim` Python 3.11 for dual `ansible-core 2.16.20` + `ansible-windows-ssh 2.18.19` compatibility, non-root `USER 1000:1000`): static `dynamic-inventory` + `ludus-server` + `ludus-edge-proxy` + `ludus`, embedded 81 MB `/opt/ludus/resources/ludus-edge.iso`, `python3`, `ansible`, `proxmoxer`, `pywinrm`, `netaddr`, `dnspython`, `jmespath`, `sshpass`, `openssh-client`, `proxychains4`, `git`, `jq`, `curl`, `tini`, `sqlite3`, HashiCorp `packer` `1.9.4` + plugins, and `/usr/share/ludus-seed` upgrade-safe volume synchronizer (`docker/ludus-entrypoint.sh`).
+  - `lux` image (`node:24-alpine` standalone Next.js build, `sqlite` for Kopia hot dumps, non-root `USER 1000:1000`).
+- [x] **5.3 Dual-Registry Build & Push Pipeline (`docker/build-and-push.sh` + `.github/workflows/container-images.yml`):**
   - Build and push immutable versioned + SHA-tagged images to **Sophon Nexus Hosted Registry** (`https://registry-push.<domain>/ludus/{ludus-server,lux}:<tag>`, stored in Kopia-backed `hosted` blob store and pulled on `sophon-infravm` via `https://registry.<domain>/ludus/*`) and **GHCR** (`ghcr.io/cseelhoff/{ludus-server,ludus-ux}:<tag>`).
-- [ ] **5.4 Local Rootless Podman / Docker Image Smoke Test:**
-  - Verify built OCI images boot cleanly with `cap_drop: ALL` + `no-new-privileges:true`, pass healthchecks, and run non-root (`UID 1000` / `UID 1001`).
+- [x] **5.4 Local Rootless Podman / Docker Image Smoke Test:**
+  - Verified built OCI images (`localhost/ludus-server:local` + `localhost/lux:local`) boot cleanly under rootless Podman with `--cap-drop=ALL --security-opt=no-new-privileges`, run non-root (`UID 1000:1000`, `CapEff: 0000000000000000`), pass healthchecks, authenticate against `PVEAPIToken=ludus-svc@pve!controller=...`, and complete end-to-end SSH-free `LUX -> Ludus` REST login + Bearer JWT proxy calls.
 
 ---
 
 ### Phase 6 — Compose Stacks, One-Time Proxmox Token Setup & Live Cutover (`sophon-infravm` + `pve-prod-02`)
 *Goal: Package the Pure GitOps Compose stack for `sophon-infravm` (referencing pre-built registry images) and the minimal one-time Proxmox `ludus-svc@pve!controller` token setup, then validate end-to-end before retiring legacy `ludus-ctrl`.*
 
-- [ ] **6.1 Portable & Sophon Pure GitOps Compose Stacks (`docker/docker-compose.yml` + `docker/sophon-compose.yml`):**
+- [x] **6.1 Portable & Sophon Pure GitOps Compose Stacks (`docker/docker-compose.yml` + `docker/sophon-compose.yml` + `docker/.env.example`):**
   - Reference pre-built `registry.<domain>/ludus/ludus-server:<tag>` & `registry.<domain>/ludus/lux:<tag>` (with `ghcr.io/cseelhoff/*` override for standalone Docker Compose).
-  - Rootless Podman security profile (`cap_drop: [ALL]`, `security_opt: [no-new-privileges:true, label=disable]`), named volumes (`/opt/ludus/db`, `/opt/ludus/ranges`, `/opt/ludus/users`, `/opt/ludus/sources`), Traefik `websecure` + CoreDNS labels (`ludus.<domain>`, `lux.<domain>`), and Sophon Kopia `sophon.backup.*` hot SQLite dump labels.
-- [ ] **6.2 Minimal One-Time Proxmox Token & SDN Bootstrap Snippet (`docker/proxmox-bootstrap-token.sh`):**
-  - Idempotent ~30-line helper (with `--dry-run`) that creates `ludus-svc@pve!controller`, `/pool/ADMIN` + `/pool/SHARED`, SDN zone `ludus` (`ludusnat`), node scope `/nodes/pve-prod-02`, and `NoAccess` on `/pool/SOC-Range` (zero `User.Modify` / `Permissions.Modify` granted to token) — after which `ludus-server` self-deploys `ludus-edge` automatically over `:8006`!
-- [ ] **6.3 Parallel Validation & Cutover Runbook (`sophon-infravm` <-> `pve-prod-02`):**
+  - Rootless Podman security profile (`cap_drop: [ALL]`, `security_opt: [no-new-privileges:true, label=disable]`), persistent `/opt/ludus` + `/app/data` volumes, Traefik `websecure` + wildcard TLS (`ludus.<domain>`, `ludus-api.<domain>`), hairpin-free `extra_hosts` Keycloak OIDC resolution, and Sophon Kopia `sophon.backup.*` hot SQLite dump labels.
+- [x] **6.2 Minimal One-Time Proxmox Token & SDN Bootstrap Snippet (`docker/proxmox-bootstrap-token.sh`):**
+  - Idempotent helper (verified with `--dry-run`) that creates `LudusController` + `ludus-svc@pve!controller`, `/pool/ADMIN` + `/pool/SHARED`, SDN zone `ludus` (`ludusnat`), node scope `/nodes/pve-prod-02`, and `NoAccess` on `/pool/SOC-Range` (zero `User.Modify` / `Permissions.Modify` granted to token) — after which `ludus-server` self-deploys `ludus-edge` automatically over `:8006`!
+- [ ] **6.3 Parallel Validation & Cutover Runbook (`sophon-infravm` <-> `pve-prod-02`) — Runbook Complete (`docs/ludus-container-cutover-runbook.md`), Ready for Live Execution:**
   - Deploy Compose stack on `sophon-dev-infravm` / `sophon-infravm` (`pve-prod-01`) -> verify `ludus-server` automatically uploads `ludus-edge.iso`, boots & seals `ludus-edge` on `pve-prod-02` over `:8006`, and brings up `:8444` mTLS + `:51820` WireGuard.
   - Verify end-to-end acceptance: Keycloak SSO login in LUX -> create user -> WireGuard `:51820` 1-hop ping -> Packer template build over reverse preseed/WinRM proxy -> multi-VM Range `2` deploy (`SUCCESS`) -> clean `rm-range` teardown with Range `1` (`soc-first-proof`) untouched.

@@ -1,0 +1,258 @@
+# syntax=docker/dockerfile:1
+# Multi-stage rootless-compatible OCI image for Ludus (Architecture A).
+# Stage 1: Static Go binaries (dynamic-inventory -> ludus-server + ludus-edge-proxy + ludus CLI)
+# Stage 2: Deterministic secret-free Alpine 3.24.4 ludus-edge.iso builder
+# Stage 3: Pre-baked Packer 1.9.4 + plugins, Ansible Galaxy roles/collections, and Windows SSH venv
+# Stage 4: Non-root (1000:1000) Debian 12 Bookworm controller runtime
+
+# -----------------------------------------------------------------------------
+# Stage 1: Static Go builder
+# -----------------------------------------------------------------------------
+FROM docker.io/library/golang:1.25-alpine AS go-builder
+
+ARG VERSION_STRING=2.0.0-container
+ARG GIT_COMMIT=local
+
+RUN apk add --no-cache git ca-certificates
+
+ENV GODEBUG=http2client=0
+WORKDIR /src
+COPY go.work go.work.sum ./
+COPY dynamic-inventory/go.mod dynamic-inventory/go.sum ./dynamic-inventory/
+COPY ludus-api/go.mod ludus-api/go.sum ./ludus-api/
+COPY ludus-client/go.mod ludus-client/go.sum ./ludus-client/
+COPY ludus-server/go.mod ludus-server/go.sum ./ludus-server/
+
+RUN cd /src/dynamic-inventory && go mod download && \
+    cd /src/ludus-api && go mod download && \
+    cd /src/ludus-client && go mod download && \
+    cd /src/ludus-server && go mod download
+
+COPY dynamic-inventory ./dynamic-inventory
+COPY ludus-api ./ludus-api
+COPY ludus-client ./ludus-client
+COPY ludus-server ./ludus-server
+
+ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+# CRITICAL: dynamic-inventory MUST be compiled into ludus-server/ansible/range-management/
+# BEFORE building ludus-server because ludus-server/main.go embeds it via //go:embed.
+RUN mkdir -p /out && \
+    cd /src/dynamic-inventory && \
+    go build -trimpath -ldflags="-s -w" \
+      -o /src/ludus-server/ansible/range-management/dynamic-inventory . && \
+    cd /src/ludus-server && \
+    go build -trimpath -ldflags="-s -w" \
+      -o /out/ludus-edge-proxy ./cmd/ludus-edge-proxy && \
+    go build -trimpath \
+      -ldflags="-s -w -X main.VersionString=${VERSION_STRING} -X main.GitCommitHash=${GIT_COMMIT}" \
+      -o /out/ludus-server . && \
+    cd /src/ludus-client && \
+    go build -trimpath \
+      -ldflags="-s -w -X ludus/cmd.VersionString=${VERSION_STRING}+${GIT_COMMIT}" \
+      -o /out/ludus .
+
+# -----------------------------------------------------------------------------
+# Stage 2: Deterministic secret-free Alpine ludus-edge.iso builder
+# -----------------------------------------------------------------------------
+FROM docker.io/library/alpine:3.24.4 AS edge-iso-builder
+
+ARG ALPINE_ISO_URL=https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-virt-3.24.4-x86_64.iso
+ARG ALPINE_ISO_SHA256=157d353f8e54252cad2d9812a0d56bb7fa2231fc154a110e1d180d7480ef8b4f
+
+RUN apk add --no-cache python3 xorriso curl ca-certificates
+
+WORKDIR /build
+RUN curl -fsSL -o /build/alpine-virt.iso "${ALPINE_ISO_URL}" && \
+    echo "${ALPINE_ISO_SHA256}  /build/alpine-virt.iso" | sha256sum -c - && \
+    mkdir -p /build/apks && \
+    apk update && \
+    apk fetch --recursive --output /build/apks \
+      iproute2 \
+      nftables \
+      iptables \
+      dnsmasq \
+      wireguard-tools \
+      openresolv \
+      e2fsprogs \
+      blkid \
+      qemu-guest-agent \
+      openssh
+
+COPY --from=go-builder /out/ludus-edge-proxy /build/ludus-edge-proxy
+COPY docker/edge-iso/ludus-edge-init.sh /build/ludus-edge-init.sh
+COPY docker/edge-iso/build_edge_iso.py /build/build_edge_iso.py
+
+RUN python3 /build/build_edge_iso.py \
+      --stock-iso /build/alpine-virt.iso \
+      --edge-binary /build/ludus-edge-proxy \
+      --init-script /build/ludus-edge-init.sh \
+      --pkgs-dir /build/apks \
+      --apk-keys-dir /etc/apk/keys \
+      --output /build/ludus-edge.iso
+
+# -----------------------------------------------------------------------------
+# Stage 3: Pre-baked Packer plugins, Ansible Galaxy assets & Windows SSH venv
+# -----------------------------------------------------------------------------
+FROM docker.io/library/debian:bookworm-slim AS seed-builder
+
+ARG PACKER_VERSION=1.9.4
+ARG PACKER_SHA256=6cd5269c4245aa8c99e551d1b862460d63fe711c58bec618fade25f8492e80d9
+ARG PACKER_PROXMOX_VERSION=1.2.4
+ARG PACKER_ANSIBLE_VERSION=1.1.1
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      git \
+      python3 \
+      python3-pip \
+      python3-venv \
+      unzip && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Packer 1.9.4 + pre-baked Proxmox (v1.2.4 for Proxmox 9.1+) & Ansible plugins
+RUN curl -fsSL -o /tmp/packer.zip \
+      "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_amd64.zip" && \
+    echo "${PACKER_SHA256}  /tmp/packer.zip" | sha256sum -c - && \
+    unzip -q /tmp/packer.zip -d /usr/local/bin && \
+    chmod 0755 /usr/local/bin/packer && \
+    rm -f /tmp/packer.zip && \
+    mkdir -p /usr/share/ludus-seed/resources/packer/plugins && \
+    PACKER_PLUGIN_PATH=/usr/share/ludus-seed/resources/packer/plugins \
+      /usr/local/bin/packer plugins install github.com/badsectorlabs/proxmox "v${PACKER_PROXMOX_VERSION}" && \
+    PACKER_PLUGIN_PATH=/usr/share/ludus-seed/resources/packer/plugins \
+      /usr/local/bin/packer plugins install github.com/hashicorp/ansible "v${PACKER_ANSIBLE_VERSION}"
+
+# Build the isolated Windows SSH Ansible runtime expected by windows_ssh_runtime.go
+RUN mkdir -p /usr/share/ludus-seed/runtimes && \
+    /usr/bin/python3 -m venv /usr/share/ludus-seed/runtimes/ansible-windows-ssh && \
+    /usr/share/ludus-seed/runtimes/ansible-windows-ssh/bin/python3 -m pip install \
+      --no-cache-dir --disable-pip-version-check \
+      "ansible==11.13.0" \
+      "ansible-core==2.18.19" \
+      "pywinrm==0.5.0" \
+      "proxmoxer==2.2.0" \
+      "requests==2.32.5" \
+      "netaddr==1.2.1" \
+      "dnspython==2.8.0" \
+      "jmespath==1.0.1" \
+      "passlib==1.7.4"
+
+# Pre-bake all Ansible Galaxy collections & roles offline into global-{collections,roles}
+COPY ludus-server/ansible/requirements.yml /tmp/requirements.yml
+RUN mkdir -p \
+      /usr/share/ludus-seed/resources/global-collections \
+      /usr/share/ludus-seed/resources/global-roles && \
+    /usr/share/ludus-seed/runtimes/ansible-windows-ssh/bin/ansible-galaxy collection install \
+      -r /tmp/requirements.yml \
+      -p /usr/share/ludus-seed/resources/global-collections && \
+    /usr/share/ludus-seed/runtimes/ansible-windows-ssh/bin/ansible-galaxy collection install \
+      "community.proxmox:==2.1.0" \
+      -p /usr/share/ludus-seed/resources/global-collections && \
+    /usr/share/ludus-seed/runtimes/ansible-windows-ssh/bin/ansible-galaxy role install \
+      -r /tmp/requirements.yml \
+      -p /usr/share/ludus-seed/resources/global-roles && \
+    rm -f /tmp/requirements.yml
+
+COPY --from=edge-iso-builder /build/ludus-edge.iso /usr/share/ludus-seed/resources/ludus-edge.iso
+RUN sha256sum /usr/share/ludus-seed/resources/ludus-edge.iso | awk '{print $1}' > /usr/share/ludus-seed/build-id
+
+# -----------------------------------------------------------------------------
+# Stage 4: Hardened non-root runtime image (1000:1000)
+# -----------------------------------------------------------------------------
+FROM docker.io/library/debian:bookworm-slim AS runtime
+
+ARG VERSION_STRING=2.0.0-container
+ARG GIT_COMMIT=local
+
+LABEL org.opencontainers.image.title="ludus-server" \
+      org.opencontainers.image.description="Unprivileged rootless OCI controller for Ludus Cyber Ranges (Architecture A)" \
+      org.opencontainers.image.version="${VERSION_STRING}" \
+      org.opencontainers.image.revision="${GIT_COMMIT}"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    HOME=/opt/ludus \
+    LUDUS_CONTAINER_MODE=true \
+    PACKER_PLUGIN_PATH=/opt/ludus/resources/packer/plugins \
+    ANSIBLE_COLLECTIONS_PATH=/opt/ludus/resources/global-collections \
+    ANSIBLE_ROLES_PATH=/opt/ludus/resources/global-roles \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash \
+      ca-certificates \
+      curl \
+      git \
+      gnupg \
+      jq \
+      openssh-client \
+      openssl \
+      procps \
+      proxychains4 \
+      python3 \
+      python3-debian \
+      python3-pip \
+      python3-venv \
+      python3-yaml \
+      rsync \
+      sqlite3 \
+      sshpass \
+      tini \
+      unzip \
+      util-linux && \
+    rm -rf /var/lib/apt/lists/* && \
+    find /usr/lib/python* -name EXTERNALLY-MANAGED -type f -delete && \
+    python3 -m pip install --no-cache-dir --disable-pip-version-check --ignore-installed \
+      "ansible==9.3.0" \
+      "proxmoxer==2.2.0" \
+      "requests==2.32.5" \
+      "netaddr==1.2.1" \
+      "pywinrm==0.5.0" \
+      "dnspython==2.8.0" \
+      "jmespath==1.0.1" \
+      "passlib==1.7.4"
+
+# System-wide Ansible defaults so both user and admin child processes find pre-baked collections/roles
+RUN mkdir -p /etc/ansible && \
+    cat > /etc/ansible/ansible.cfg <<'EOF'
+[defaults]
+no_target_syslog = True
+timeout = 60
+host_key_checking = False
+collections_path = /opt/ludus/resources/global-collections:/usr/share/ludus-seed/resources/global-collections
+roles_path = /opt/ludus/resources/global-roles:/usr/share/ludus-seed/resources/global-roles
+EOF
+
+# Non-root ludus user/group (1000:1000) matching Sophon rootless Podman UID mapping
+RUN groupadd -g 1000 ludus && \
+    useradd -u 1000 -g 1000 -d /opt/ludus -s /bin/bash -M ludus && \
+    mkdir -p /opt/ludus /etc/ludus && \
+    chown -R 1000:1000 /opt/ludus /etc/ludus
+
+COPY --from=seed-builder /usr/local/bin/packer /usr/local/bin/packer
+COPY --from=seed-builder --chown=1000:1000 /usr/share/ludus-seed /usr/share/ludus-seed
+COPY --from=go-builder /out/ludus-server /usr/local/bin/ludus-server
+COPY --from=go-builder /out/ludus-edge-proxy /usr/local/bin/ludus-edge-proxy
+COPY --from=go-builder /out/ludus /usr/local/bin/ludus
+COPY docker/ludus-entrypoint.sh /usr/local/bin/ludus-entrypoint.sh
+
+RUN chmod 0755 \
+      /usr/local/bin/ludus-server \
+      /usr/local/bin/ludus-edge-proxy \
+      /usr/local/bin/ludus \
+      /usr/local/bin/ludus-entrypoint.sh && \
+    cp -a /usr/share/ludus-seed/resources /opt/ludus/resources && \
+    mkdir -p /opt/ludus/runtimes && \
+    ln -s /usr/share/ludus-seed/runtimes/ansible-windows-ssh /opt/ludus/runtimes/ansible-windows-ssh && \
+    cp /usr/share/ludus-seed/build-id /opt/ludus/.image-seed-id && \
+    chown -R 1000:1000 /opt/ludus
+
+WORKDIR /opt/ludus
+USER 1000:1000
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8080/ >/dev/null || curl -kfsS https://127.0.0.1:8080/ >/dev/null || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/ludus-entrypoint.sh"]

@@ -1,0 +1,111 @@
+# Portable rootless-compatible Docker / Podman Compose stack for Architecture A
+# (unprivileged ludus-server + SSH-free LUX web UI + remote Proxmox ludus-edge).
+# Copy docker/.env.example -> docker/.env and adjust values before `compose up -d`.
+
+services:
+  ludus:
+    image: ${LUDUS_IMAGE:-ghcr.io/cseelhoff/ludus-server:latest}
+    container_name: ludus
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+      - label=disable
+    cap_drop:
+      - ALL
+    environment:
+      - LUDUS_CONTAINER_MODE=true
+      - LUDUS_TLS_ENABLED=${LUDUS_TLS_ENABLED:-false}
+      - LUDUS_PORT=8080
+      - LUDUS_ADMIN_PORT=8081
+      - LUDUS_PROXMOX_AUTH_MODE=service_token
+      - LUDUS_PROXMOX_URL=${LUDUS_PROXMOX_URL}
+      - LUDUS_PROXMOX_NODE=${LUDUS_PROXMOX_NODE:-pve-prod-02}
+      - LUDUS_PROXMOX_HOSTNAME=${LUDUS_PROXMOX_HOSTNAME:-pve-prod-02}
+      - LUDUS_PROXMOX_INTERFACE=${LUDUS_PROXMOX_INTERFACE:-vmbr0}
+      - LUDUS_PROXMOX_LOCAL_IP=${LUDUS_PROXMOX_LOCAL_IP}
+      - LUDUS_PROXMOX_PUBLIC_IP=${LUDUS_PROXMOX_PUBLIC_IP:-}
+      - LUDUS_PROXMOX_GATEWAY=${LUDUS_PROXMOX_GATEWAY}
+      - LUDUS_PROXMOX_NETMASK=${LUDUS_PROXMOX_NETMASK:-255.255.255.0}
+      - LUDUS_PROXMOX_VM_STORAGE_POOL=${LUDUS_PROXMOX_VM_STORAGE_POOL:-local-lvm}
+      - LUDUS_PROXMOX_VM_STORAGE_FORMAT=${LUDUS_PROXMOX_VM_STORAGE_FORMAT:-raw}
+      - LUDUS_PROXMOX_ISO_STORAGE_POOL=${LUDUS_PROXMOX_ISO_STORAGE_POOL:-local}
+      - LUDUS_PROXMOX_INVALID_CERT=${LUDUS_PROXMOX_INVALID_CERT:-true}
+      - LUDUS_PROXMOX_API_TOKEN_ID=${LUDUS_PROXMOX_API_TOKEN_ID:-ludus-svc@pve!controller}
+      - LUDUS_PROXMOX_API_TOKEN_SECRET=${LUDUS_PROXMOX_API_TOKEN_SECRET}
+      - LUDUS_ENCRYPTION_KEY=${LUDUS_ENCRYPTION_KEY}
+      - LUDUS_EDGE_PROXY_ENABLED=${LUDUS_EDGE_PROXY_ENABLED:-true}
+      - LUDUS_EDGE_AUTO_PROVISION=${LUDUS_EDGE_AUTO_PROVISION:-true}
+      - LUDUS_EDGE_VM_ID=${LUDUS_EDGE_VM_ID:-999}
+      - LUDUS_EDGE_VM_NAME=${LUDUS_EDGE_VM_NAME:-ludus-edge}
+      - LUDUS_EDGE_VM_IP=${LUDUS_EDGE_VM_IP}
+      - LUDUS_EDGE_VM_CIDR=${LUDUS_EDGE_VM_CIDR}
+      - LUDUS_EDGE_VM_GATEWAY=${LUDUS_EDGE_VM_GATEWAY}
+      - LUDUS_EDGE_VM_DNS=${LUDUS_EDGE_VM_DNS:-1.1.1.1}
+      - LUDUS_EDGE_PUBLIC_ENDPOINT=${LUDUS_EDGE_PUBLIC_ENDPOINT:-}
+      - LUDUS_ADMIN_USER_ID=${LUDUS_ADMIN_USER_ID:-CA}
+      - LUDUS_ADMIN_NAME=${LUDUS_ADMIN_NAME:-Ludus Admin}
+      - LUDUS_ADMIN_EMAIL=${LUDUS_ADMIN_EMAIL:-admin@example.local}
+      - LUDUS_ADMIN_PASSWORD=${LUDUS_ADMIN_PASSWORD}
+      - LUDUS_OIDC_ENABLED=${LUDUS_OIDC_ENABLED:-false}
+      - LUDUS_OIDC_ISSUER_URL=${LUDUS_OIDC_ISSUER_URL:-}
+      - LUDUS_OIDC_CLIENT_ID=${LUDUS_OIDC_CLIENT_ID:-}
+      - LUDUS_OIDC_CLIENT_SECRET=${LUDUS_OIDC_CLIENT_SECRET:-}
+      - LUDUS_OIDC_DISPLAY_NAME=${LUDUS_OIDC_DISPLAY_NAME:-Keycloak SSO}
+      - LUDUS_OIDC_ADMIN_GROUPS=${LUDUS_OIDC_ADMIN_GROUPS:-ludus-admins}
+      - LUDUS_OIDC_USER_GROUPS=${LUDUS_OIDC_USER_GROUPS:-ludus-users}
+      - LUDUS_SSO_REQUIRE_EXISTING_USER=${LUDUS_SSO_REQUIRE_EXISTING_USER:-false}
+      - LUDUS_LOCAL_AUTH_ENABLED=${LUDUS_LOCAL_AUTH_ENABLED:-true}
+    volumes:
+      - ludus_data:/opt/ludus
+    ports:
+      - "${LUDUS_BIND_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+
+  lux:
+    image: ${LUX_IMAGE:-ghcr.io/cseelhoff/ludus-ux:latest}
+    container_name: lux
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+      - label=disable
+    cap_drop:
+      - ALL
+    depends_on:
+      ludus:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOSTNAME=0.0.0.0
+      - DISABLE_HTTPS=${LUX_DISABLE_HTTPS:-true}
+      - TRUST_PROXY_TLS=${LUX_TRUST_PROXY_TLS:-false}
+      - DATA_DIR=/app/data
+      - APP_SECRET=${LUX_APP_SECRET}
+      - LUX_CONTAINER_MODE=true
+      - LUX_LOCAL_AUTH_ENABLED=${LUX_LOCAL_AUTH_ENABLED:-true}
+      - LUDUS_URL=http://ludus:8080
+      - LUDUS_TLS_VERIFY=false
+      - LUX_PUBLIC_URL=${LUX_PUBLIC_URL:-http://localhost:3000}
+      - LUX_OIDC_ISSUER_URL=${LUX_OIDC_ISSUER_URL:-}
+      - LUX_OIDC_CLIENT_ID=${LUX_OIDC_CLIENT_ID:-}
+      - LUX_OIDC_CLIENT_SECRET=${LUX_OIDC_CLIENT_SECRET:-}
+      - LUX_OIDC_DISPLAY_NAME=${LUX_OIDC_DISPLAY_NAME:-Keycloak SSO}
+    volumes:
+      - lux_data:/app/data
+    ports:
+      - "${LUX_BIND_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  ludus_data:
+  lux_data:

@@ -1,0 +1,17 @@
+.git
+.github
+bin
+dist
+build
+*.iso
+*.tar.gz
+*.log
+*.test
+*.out
+coverage.txt
+ludus-server/ludus-server
+ludus-server/config.yml
+ludus-server/ansible/range-management/dynamic-inventory
+ludus-client/ludus
+dynamic-inventory/dynamic-inventory
+docs

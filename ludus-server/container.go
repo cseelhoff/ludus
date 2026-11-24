@@ -88,12 +88,15 @@ func seedContainerInitialAdminFromEnv() error {
 		name = userID
 	}
 	email := strings.TrimSpace(os.Getenv("LUDUS_ADMIN_EMAIL"))
+	if email == "" {
+		email = fmt.Sprintf("%s@ludus.local", strings.ToLower(userID))
+	}
 
 	payload := struct {
 		Name     string `yaml:"name"`
-		UserID   string `yaml:"user_id"`
+		UserID   string `yaml:"userID"`
 		Password string `yaml:"password"`
-		Email    string `yaml:"email,omitempty"`
+		Email    string `yaml:"email"`
 	}{
 		Name:     name,
 		UserID:   userID,
