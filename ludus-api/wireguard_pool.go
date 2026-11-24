@@ -1,0 +1,316 @@
+package ludusapi
+
+import (
+	"crypto/hkdf"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+
+	"golang.org/x/crypto/curve25519"
+)
+
+const (
+	// WireGuardPoolHKDFDomain separates deterministic WireGuard client slot derivation.
+	WireGuardPoolHKDFDomain = "ludus-wg-pool-v1"
+	// WireGuardServerSlot is 198.51.100.1, reserved for wg0 on Ludus / ludus-edge.
+	WireGuardServerSlot = 1
+	// WireGuardMinClientSlot is the lowest client slot (userNumber starts at 2).
+	WireGuardMinClientSlot = 2
+	// WireGuardDefaultMaxSlot is the default highest pre-allocated peer slot.
+	WireGuardDefaultMaxSlot = 250
+	// WireGuardHardMaxSlot is the highest valid IPv4 host octet in 198.51.100.0/24.
+	WireGuardHardMaxSlot = 254
+	// DefaultWireGuardListenPort is the standard Ludus WireGuard UDP port.
+	DefaultWireGuardListenPort = 51820
+)
+
+// WireGuardClientPool is stored on the Ludus control plane (wg_pool.json).
+// Security invariant: it never contains the ludus-edge ServerPrivateKey.
+type WireGuardClientPool struct {
+	Version         int    `json:"version"`
+	ServerPublicKey string `json:"server_public_key"`
+	Endpoint        string `json:"endpoint"`
+	ListenPort      int    `json:"listen_port"`
+	ClientPoolSeed  string `json:"client_pool_seed"`
+	MinSlot         int    `json:"min_slot"`
+	MaxSlot         int    `json:"max_slot"`
+}
+
+// EdgeWireGuardBundle holds the paired artifacts generated during Day-0 bootstrap.
+// ServerConfig goes exclusively to ludus-edge (zero client private keys or seed);
+// ClientPool stays exclusively on ludus (zero server private key).
+type EdgeWireGuardBundle struct {
+	ServerConfig string
+	ClientPool   WireGuardClientPool
+}
+
+type wireGuardSlotState struct {
+	HighWaterSlot int `json:"high_water_slot"`
+}
+
+var wgSlotMu sync.Mutex
+
+func clampCurve25519Scalar(scalar *[32]byte) {
+	scalar[0] &= 248
+	scalar[31] &= 127
+	scalar[31] |= 64
+}
+
+// GenerateWireGuardKeypair generates a random X25519 WireGuard keypair encoded as standard base64.
+func GenerateWireGuardKeypair() (privateKeyB64 string, publicKeyB64 string, err error) {
+	var priv [32]byte
+	if _, err := rand.Read(priv[:]); err != nil {
+		return "", "", fmt.Errorf("reading CSPRNG bytes for WireGuard keypair: %w", err)
+	}
+	clampCurve25519Scalar(&priv)
+	pub, err := curve25519.X25519(priv[:], curve25519.Basepoint)
+	if err != nil {
+		return "", "", fmt.Errorf("computing X25519 public key: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(priv[:]), base64.StdEncoding.EncodeToString(pub), nil
+}
+
+// DeriveWireGuardSlotKeypair deterministically derives the X25519 keypair for a user slot (2..254)
+// from the 32-byte master client pool seed using HKDF-SHA256 + RFC 7748 clamping.
+func DeriveWireGuardSlotKeypair(clientPoolSeed []byte, slot int) (privateKeyB64 string, publicKeyB64 string, err error) {
+	if len(clientPoolSeed) < 32 {
+		return "", "", fmt.Errorf("client pool seed must be at least 32 bytes (got %d)", len(clientPoolSeed))
+	}
+	if slot < WireGuardMinClientSlot || slot > WireGuardHardMaxSlot {
+		return "", "", fmt.Errorf("WireGuard slot %d out of valid range [%d..%d]", slot, WireGuardMinClientSlot, WireGuardHardMaxSlot)
+	}
+
+	info := fmt.Sprintf("%s:slot:%d", WireGuardPoolHKDFDomain, slot)
+	derived, err := hkdf.Key(sha256.New, clientPoolSeed, nil, info, 32)
+	if err != nil {
+		return "", "", fmt.Errorf("deriving HKDF key for slot %d: %w", slot, err)
+	}
+
+	var priv [32]byte
+	copy(priv[:], derived)
+	clampCurve25519Scalar(&priv)
+
+	pub, err := curve25519.X25519(priv[:], curve25519.Basepoint)
+	if err != nil {
+		return "", "", fmt.Errorf("computing X25519 public key for slot %d: %w", slot, err)
+	}
+
+	return base64.StdEncoding.EncodeToString(priv[:]), base64.StdEncoding.EncodeToString(pub), nil
+}
+
+// GenerateEdgeWireGuardBundle creates a fresh server keypair and 32-byte client pool seed,
+// rendering a static wg0.conf for ludus-edge (public keys only) and a WireGuardClientPool for ludus.
+func GenerateEdgeWireGuardBundle(endpoint string, listenPort int, maxSlot int) (*EdgeWireGuardBundle, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if listenPort <= 0 {
+		listenPort = DefaultWireGuardListenPort
+	}
+	if maxSlot == 0 {
+		maxSlot = WireGuardDefaultMaxSlot
+	}
+	if maxSlot < WireGuardMinClientSlot || maxSlot > WireGuardHardMaxSlot {
+		return nil, fmt.Errorf("maxSlot %d must be between %d and %d", maxSlot, WireGuardMinClientSlot, WireGuardHardMaxSlot)
+	}
+	if endpoint != "" {
+		if _, _, err := net.SplitHostPort(endpoint); err != nil {
+			endpoint = net.JoinHostPort(endpoint, strconv.Itoa(listenPort))
+		}
+	}
+
+	serverPriv, serverPub, err := GenerateWireGuardKeypair()
+	if err != nil {
+		return nil, err
+	}
+
+	var seed [32]byte
+	if _, err := rand.Read(seed[:]); err != nil {
+		return nil, fmt.Errorf("generating WireGuard client pool seed: %w", err)
+	}
+
+	var wgConf strings.Builder
+	wgConf.Grow(256 + (maxSlot-WireGuardMinClientSlot+1)*128)
+	fmt.Fprintf(&wgConf, "# Generated by Ludus deterministic WireGuard pool (zero client private keys)\n")
+	fmt.Fprintf(&wgConf, "[Interface]\n")
+	fmt.Fprintf(&wgConf, "Address = 198.51.100.%d/24\n", WireGuardServerSlot)
+	fmt.Fprintf(&wgConf, "ListenPort = %d\n", listenPort)
+	fmt.Fprintf(&wgConf, "PrivateKey = %s\n", serverPriv)
+
+	for slot := WireGuardMinClientSlot; slot <= maxSlot; slot++ {
+		_, clientPub, err := DeriveWireGuardSlotKeypair(seed[:], slot)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(&wgConf, "\n# Slot %d\n[Peer]\nPublicKey = %s\nAllowedIPs = 198.51.100.%d/32\n", slot, clientPub, slot)
+	}
+
+	pool := WireGuardClientPool{
+		Version:         1,
+		ServerPublicKey: serverPub,
+		Endpoint:        endpoint,
+		ListenPort:      listenPort,
+		ClientPoolSeed:  base64.StdEncoding.EncodeToString(seed[:]),
+		MinSlot:         WireGuardMinClientSlot,
+		MaxSlot:         maxSlot,
+	}
+
+	return &EdgeWireGuardBundle{
+		ServerConfig: wgConf.String(),
+		ClientPool:   pool,
+	}, nil
+}
+
+// WriteWireGuardBundleFiles writes wg0.conf (0600) and wg_pool.json (0600) to disk.
+func WriteWireGuardBundleFiles(serverConfPath string, clientPoolPath string, bundle *EdgeWireGuardBundle) error {
+	if bundle == nil {
+		return fmt.Errorf("nil EdgeWireGuardBundle")
+	}
+	if serverConfPath != "" {
+		if err := os.MkdirAll(filepath.Dir(serverConfPath), 0700); err != nil {
+			return fmt.Errorf("creating directory for %s: %w", serverConfPath, err)
+		}
+		if err := os.WriteFile(serverConfPath, []byte(bundle.ServerConfig), 0600); err != nil {
+			return fmt.Errorf("writing %s: %w", serverConfPath, err)
+		}
+	}
+	if clientPoolPath != "" {
+		if err := os.MkdirAll(filepath.Dir(clientPoolPath), 0700); err != nil {
+			return fmt.Errorf("creating directory for %s: %w", clientPoolPath, err)
+		}
+		data, err := json.MarshalIndent(bundle.ClientPool, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshaling WireGuard client pool: %w", err)
+		}
+		if err := os.WriteFile(clientPoolPath, append(data, '\n'), 0600); err != nil {
+			return fmt.Errorf("writing %s: %w", clientPoolPath, err)
+		}
+	}
+	return nil
+}
+
+// LoadWireGuardClientPool loads and validates a wg_pool.json file.
+func LoadWireGuardClientPool(path string) (*WireGuardClientPool, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading WireGuard pool file %s: %w", path, err)
+	}
+	var pool WireGuardClientPool
+	if err := json.Unmarshal(raw, &pool); err != nil {
+		return nil, fmt.Errorf("parsing WireGuard pool file %s: %w", path, err)
+	}
+	if strings.TrimSpace(pool.ServerPublicKey) == "" {
+		return nil, fmt.Errorf("WireGuard pool %s is missing server_public_key", path)
+	}
+	seedBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(pool.ClientPoolSeed))
+	if err != nil || len(seedBytes) < 32 {
+		return nil, fmt.Errorf("WireGuard pool %s has invalid client_pool_seed", path)
+	}
+	if pool.MinSlot == 0 {
+		pool.MinSlot = WireGuardMinClientSlot
+	}
+	if pool.MaxSlot == 0 {
+		pool.MaxSlot = WireGuardDefaultMaxSlot
+	}
+	if pool.ListenPort <= 0 {
+		pool.ListenPort = DefaultWireGuardListenPort
+	}
+	return &pool, nil
+}
+
+// DeriveClientPrivateKeyFromPool derives the slot private key from a loaded WireGuardClientPool.
+func (p *WireGuardClientPool) DeriveClientPrivateKey(slot int) (string, error) {
+	if p == nil {
+		return "", fmt.Errorf("WireGuardClientPool is nil")
+	}
+	if slot < p.MinSlot || slot > p.MaxSlot {
+		return "", fmt.Errorf("user slot %d is outside configured WireGuard pool bounds [%d..%d]", slot, p.MinSlot, p.MaxSlot)
+	}
+	seedBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(p.ClientPoolSeed))
+	if err != nil {
+		return "", fmt.Errorf("decoding client_pool_seed: %w", err)
+	}
+	priv, _, err := DeriveWireGuardSlotKeypair(seedBytes, slot)
+	return priv, err
+}
+
+func effectiveEdgeStateDir() string {
+	if dir := strings.TrimSpace(ServerConfiguration.EdgeStateDir); dir != "" {
+		return dir
+	}
+	return filepath.Join(ludusInstallPath, "db", "edge")
+}
+
+// DefaultManagedWireGuardPoolPath returns the default persistent path used when auto-provisioning ludus-edge.
+func DefaultManagedWireGuardPoolPath() string {
+	return filepath.Join(effectiveEdgeStateDir(), "wg_pool.json")
+}
+
+// EffectiveWireGuardPoolPath returns the active wg_pool.json path when configured or present in container/edge mode.
+func EffectiveWireGuardPoolPath() string {
+	if explicit := strings.TrimSpace(ServerConfiguration.WireguardPoolFile); explicit != "" {
+		return explicit
+	}
+	if IsContainerMode() || ServerConfiguration.EdgeAutoProvision || ServerConfiguration.EdgeProxyEnabled {
+		candidate := DefaultManagedWireGuardPoolPath()
+		if FileExists(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// IsWireGuardPoolEnabled reports whether WireGuard client configs should be served from a deterministic pool.
+func IsWireGuardPoolEnabled() bool {
+	return EffectiveWireGuardPoolPath() != "" || IsContainerMode() || ServerConfiguration.EdgeAutoProvision
+}
+
+func wireGuardSlotStatePath() string {
+	if p := strings.TrimSpace(ServerConfiguration.WireguardPoolFile); p != "" {
+		// /run/secrets/* may be read-only; persist mutable high-water state under EdgeStateDir.
+		if !strings.HasPrefix(p, "/run/") {
+			return filepath.Join(filepath.Dir(p), "wg_slot_state.json")
+		}
+	}
+	return filepath.Join(effectiveEdgeStateDir(), "wg_slot_state.json")
+}
+
+// AllocateMonotonicWireGuardUserSlot ensures deleted user slots are never recycled to future users
+// while the same deterministic WireGuard pool seed is active.
+func AllocateMonotonicWireGuardUserSlot(existingNumbers []int) int {
+	wgSlotMu.Lock()
+	defer wgSlotMu.Unlock()
+
+	maxSeen := WireGuardServerSlot // 1 -> next is 2
+	for _, n := range existingNumbers {
+		if n > maxSeen {
+			maxSeen = n
+		}
+	}
+
+	statePath := wireGuardSlotStatePath()
+	if raw, err := os.ReadFile(statePath); err == nil {
+		var st wireGuardSlotState
+		if json.Unmarshal(raw, &st) == nil && st.HighWaterSlot > maxSeen {
+			maxSeen = st.HighWaterSlot
+		}
+	}
+
+	next := maxSeen + 1
+	if next < WireGuardMinClientSlot {
+		next = WireGuardMinClientSlot
+	}
+
+	if err := os.MkdirAll(filepath.Dir(statePath), 0700); err == nil {
+		if data, mErr := json.Marshal(wireGuardSlotState{HighWaterSlot: next}); mErr == nil {
+			_ = os.WriteFile(statePath, append(data, '\n'), 0600)
+		}
+	}
+	return next
+}

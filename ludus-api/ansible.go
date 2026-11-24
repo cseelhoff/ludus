@@ -337,6 +337,12 @@ func (s *Server) RunAnsiblePlaybookWithVariables(e *core.RequestEvent, playbookP
 		}
 	}
 
+	if user.UserId() != "ROOT" {
+		for k, v := range BuildEdgeProxyEnvVars() {
+			ansibleExecute.EnvVars[k] = v
+		}
+	}
+
 	playbook := &playbook.AnsiblePlaybookCmd{
 		Playbooks:         playbookPathArray,
 		Exec:              ansibleExecute,
@@ -728,6 +734,10 @@ func RunLocalAnsiblePlaybookOnTmpRangeConfig(e *core.RequestEvent, playbookPathA
 		if strings.HasPrefix(envVarKey, "LUDUS_SECRET_") {
 			ansibleExecute.EnvVars[envVarKey] = envVarValue
 		}
+	}
+
+	for k, v := range BuildEdgeProxyEnvVars() {
+		ansibleExecute.EnvVars[k] = v
 	}
 
 	ansiblePlaybookOptions := &playbook.AnsiblePlaybookOptions{

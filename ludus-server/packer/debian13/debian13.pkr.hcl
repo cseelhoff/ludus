@@ -89,6 +89,26 @@ variable "ansible_home" {
 variable "ludus_nat_interface" {
   type = string
 }
+variable "http_bind_address" {
+  type    = string
+  default = ""
+}
+variable "http_ip" {
+  type    = string
+  default = ""
+}
+variable "http_port" {
+  type    = number
+  default = 0
+}
+variable "ssh_proxy_host" {
+  type    = string
+  default = ""
+}
+variable "ssh_proxy_port" {
+  type    = number
+  default = 0
+}
 ####
 
 locals {
@@ -106,7 +126,13 @@ source "proxmox-iso" "debian13" {
   ]
   boot_key_interval = "100ms"
   http_directory    = "./http"
-  http_interface    = "${var.ludus_nat_interface}"
+  http_interface    = var.http_bind_address != "" ? null : var.ludus_nat_interface
+  http_bind_address = var.http_bind_address != "" ? var.http_bind_address : null
+  http_ip           = var.http_ip != "" ? var.http_ip : null
+  http_port_min     = var.http_port > 0 ? var.http_port : 8000
+  http_port_max     = var.http_port > 0 ? var.http_port : 9000
+  ssh_proxy_host    = var.ssh_proxy_host != "" ? var.ssh_proxy_host : null
+  ssh_proxy_port    = var.ssh_proxy_port > 0 ? var.ssh_proxy_port : null
 
   boot_iso {
     type              = "ide"

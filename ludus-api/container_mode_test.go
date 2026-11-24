@@ -59,7 +59,7 @@ func TestContainerAndServiceTokenConfigDefaults(t *testing.T) {
 	if cfg.EdgeProxyAddr != "10.0.20.181:8444" {
 		t.Fatalf("expected derived EdgeProxyAddr=10.0.20.181:8444, got %q", cfg.EdgeProxyAddr)
 	}
-	if cfg.WireguardPoolFile != filepath.Join(tmpDir, "db", "edge", "wireguard-pool.json") {
+	if cfg.WireguardPoolFile != filepath.Join(tmpDir, "db", "edge", "wg_pool.json") {
 		t.Fatalf("unexpected WireguardPoolFile %q", cfg.WireguardPoolFile)
 	}
 }

@@ -21,6 +21,10 @@ var (
 	containerFlag      bool
 	adminServerFlag    bool
 	userServerFlag     bool
+	genWGPoolDirFlag   string
+	wgEndpointFlag     string
+	wgMaxSlotsFlag     int
+	proxyDialFlag      bool
 )
 
 func init() {
@@ -30,6 +34,10 @@ func init() {
 	flag.BoolVar(&containerFlag, "container", false, "run Ludus in unprivileged OCI container supervisor mode (manages both admin and user API servers)")
 	flag.BoolVar(&adminServerFlag, "admin", false, "run this process in ludus-admin API role (127.0.0.1:8081)")
 	flag.BoolVar(&userServerFlag, "user-server", false, "run this process in user-facing ludus API role (0.0.0.0:8080)")
+	flag.StringVar(&genWGPoolDirFlag, "gen-wg-pool", "", "generate deterministic WireGuard edge bundle (wg0.conf + wg_pool.json) in the specified directory and exit")
+	flag.StringVar(&wgEndpointFlag, "wg-endpoint", "", "WireGuard endpoint host:port embedded in wg_pool.json when using --gen-wg-pool")
+	flag.IntVar(&wgMaxSlotsFlag, "wg-max-slots", 250, "maximum pre-allocated WireGuard client slot (2..254) when using --gen-wg-pool")
+	flag.BoolVar(&proxyDialFlag, "proxy-dial", false, "tunnel stdin/stdout to <host> <port> via ludus-edge mTLS proxy (OpenSSH ProxyCommand helper)")
 	flag.BoolVar(&versionFlag, "v", false, "print the version of this ludus server")
 	flag.BoolVar(&versionFlag, "version", false, "print the version of this ludus server")
 	flag.BoolVar(&helpFlag, "h", false, "display help information")
@@ -49,6 +57,22 @@ func checkArgs() {
 
 	if versionFlag {
 		fmt.Println(LudusVersion)
+		os.Exit(0)
+	}
+
+	if genWGPoolDirFlag != "" {
+		if err := runGenerateWireGuardPoolCLI(genWGPoolDirFlag, wgEndpointFlag, wgMaxSlotsFlag); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to generate WireGuard pool: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	if proxyDialFlag {
+		if err := runProxyDialCLI(flag.Args()); err != nil {
+			fmt.Fprintf(os.Stderr, "ludus-server --proxy-dial failed: %v\n", err)
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 

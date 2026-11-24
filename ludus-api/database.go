@@ -474,6 +474,14 @@ func findNextAvailableUserNumber(txApp core.App) int {
 	}
 
 	// Start at 2 since 1 is reserved for the root user (198.51.100.1 is reserved for the server)
+	if IsWireGuardPoolEnabled() {
+		existing := make([]int, 0, len(rows))
+		for _, num := range rows {
+			existing = append(existing, num.UserNumber)
+		}
+		return AllocateMonotonicWireGuardUserSlot(existing)
+	}
+
 	for i := int(2); ; i++ {
 		found := false
 		for _, num := range rows {
@@ -606,7 +614,11 @@ func populateUserFieldsFromOAuth2Provider(e *core.RecordAuthWithOAuth2RequestEve
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("https://127.0.0.1:%d/api/v2/user/provision-oauth2", ServerConfiguration.AdminPort), bytes.NewReader(bodyBytes))
+	adminScheme := "https"
+	if !ServerConfiguration.IsTLSEnabled() {
+		adminScheme = "http"
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s://127.0.0.1:%d/api/v2/user/provision-oauth2", adminScheme, ServerConfiguration.AdminPort), bytes.NewReader(bodyBytes))
 	if err != nil {
 		return fmt.Errorf("creating provision request: %w", err)
 	}

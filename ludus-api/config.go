@@ -392,7 +392,7 @@ func (c *Configuration) ApplyRemoteProxmoxDefaults() {
 		c.EdgeProxyAddr = fmt.Sprintf("%s:8444", strings.TrimSpace(c.EdgeVMIP))
 	}
 	if strings.TrimSpace(c.WireguardPoolFile) == "" && (c.EdgeProxyEnabled || c.EdgeAutoProvision) {
-		c.WireguardPoolFile = filepath.Join(c.EdgeStateDir, "wireguard-pool.json")
+		c.WireguardPoolFile = filepath.Join(c.EdgeStateDir, "wg_pool.json")
 	}
 	if strings.TrimSpace(c.EdgeProxyCAFile) == "" && c.EdgeAutoProvision {
 		c.EdgeProxyCAFile = filepath.Join(c.EdgeStateDir, "ca.crt")

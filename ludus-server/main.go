@@ -62,6 +62,17 @@ func serve() {
 	// Setup PocketBase app
 	app := ludusapi.NewRouter(LudusVersion, server)
 
+	if !ludusapi.IsAdminProcess() && ludusapi.ServerConfiguration.EdgeProxyEnabled {
+		edgeClient, err := ludusapi.EnsureActiveEdgeProxyClient(&ludusapi.ServerConfiguration)
+		if err != nil {
+			log.Fatalf("Failed to start local ludus-edge mTLS proxy forwarder: %v", err)
+		}
+		if edgeClient != nil {
+			logger.Info(fmt.Sprintf("Started local ludus-edge mTLS forwarder on %s -> %s",
+				edgeClient.LocalProxyAddr(), ludusapi.ServerConfiguration.EdgeProxyAddr))
+		}
+	}
+
 	if len(server.Entitlements) == 0 {
 		logger.Info("LICENSE: Community (no entitlements)")
 	}

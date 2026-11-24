@@ -15,20 +15,56 @@ Address = 198.51.100.{{ .user_number }}/32
 
 [Peer]
 PublicKey = {{ .server_public_key }}
-Endpoint = {{ .proxmox_public_ip }}:{{ .wireguard_port}}
+Endpoint = {{ .endpoint }}
 AllowedIPs = {{ .allowed_ips }}
 PersistentKeepalive = 25
 `
 
-func getWireGuardConfigForUser(user *models.User) (string, error) {
-	// Get the server public key
-	serverPublicKey, err := os.ReadFile("/etc/wireguard/server-public-key")
-	if err != nil {
-		return "", err
+func resolveWireGuardKeyMaterialForUser(user *models.User) (clientPrivateKey string, serverPublicKey string, endpoint string, err error) {
+	if poolPath := EffectiveWireGuardPoolPath(); poolPath != "" {
+		pool, err := LoadWireGuardClientPool(poolPath)
+		if err != nil {
+			return "", "", "", err
+		}
+		priv, err := pool.DeriveClientPrivateKey(user.UserNumber())
+		if err != nil {
+			return "", "", "", err
+		}
+		ep := strings.TrimSpace(pool.Endpoint)
+		if ep == "" {
+			host := strings.TrimSpace(ServerConfiguration.EdgeVMIP)
+			if host == "" {
+				host = strings.TrimSpace(ServerConfiguration.ProxmoxPublicIP)
+			}
+			port := pool.ListenPort
+			if ServerConfiguration.WireguardPort > 0 {
+				port = ServerConfiguration.WireguardPort
+			}
+			ep = fmt.Sprintf("%s:%d", host, port)
+		}
+		return priv, strings.TrimSpace(pool.ServerPublicKey), ep, nil
 	}
 
-	// Get the client private key
-	clientPrivateKey, err := os.ReadFile(fmt.Sprintf("/etc/wireguard/%s-client-private-key", user.UserId()))
+	if IsContainerMode() {
+		return "", "", "", fmt.Errorf("WireGuard pool is not initialized yet (set wireguard_pool_file or enable edge_auto_provision)")
+	}
+
+	serverPubBytes, err := os.ReadFile("/etc/wireguard/server-public-key")
+	if err != nil {
+		return "", "", "", err
+	}
+	clientPrivBytes, err := os.ReadFile(fmt.Sprintf("/etc/wireguard/%s-client-private-key", user.UserId()))
+	if err != nil {
+		return "", "", "", err
+	}
+	return strings.TrimSpace(string(clientPrivBytes)),
+		strings.TrimSpace(string(serverPubBytes)),
+		fmt.Sprintf("%s:%d", ServerConfiguration.ProxmoxPublicIP, ServerConfiguration.WireguardPort),
+		nil
+}
+
+func getWireGuardConfigForUser(user *models.User) (string, error) {
+	clientPrivateKey, serverPublicKey, endpoint, err := resolveWireGuardKeyMaterialForUser(user)
 	if err != nil {
 		return "", err
 	}
@@ -46,12 +82,11 @@ func getWireGuardConfigForUser(user *models.User) (string, error) {
 
 	var result bytes.Buffer
 	if err := template.Execute(&result, map[string]interface{}{
-		"client_private_key": strings.TrimSpace(string(clientPrivateKey)),
-		"server_public_key":  strings.TrimSpace(string(serverPublicKey)),
-		"proxmox_public_ip":  ServerConfiguration.ProxmoxPublicIP,
+		"client_private_key": clientPrivateKey,
+		"server_public_key":  serverPublicKey,
+		"endpoint":           endpoint,
 		"user_number":        user.UserNumber(),
 		"allowed_ips":        allowedIPs,
-		"wireguard_port":     ServerConfiguration.WireguardPort,
 	}); err != nil {
 		return "", err
 	}

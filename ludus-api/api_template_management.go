@@ -11,6 +11,7 @@ import (
 	"ludusapi/commandmanager"
 	"ludusapi/dto"
 	"ludusapi/models"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -325,7 +326,50 @@ func buildVMFromTemplateWithPacker(user *models.User, packerFile string, templat
 	usersAnsibleDir := fmt.Sprintf("%s/users/%s/.ansible", ludusInstallPath, user.ProxmoxUsername())
 	os.MkdirAll(fmt.Sprintf("%s/users/%s/packer/tmp", ludusInstallPath, user.ProxmoxUsername()), 0755)
 
-	tmplStr := `PACKER_PLUGIN_PATH={{.LudusInstallPath}}/resources/packer/plugins ` +
+	edgeEnvPrefix := ""
+	if ServerConfiguration.EdgeProxyEnabled {
+		edgeClient, err := EnsureActiveEdgeProxyClient(&ServerConfiguration)
+		if err != nil {
+			return fmt.Errorf("starting local ludus-edge proxy for Packer: %w", err)
+		}
+		packerPort, err := AcquirePackerReversePort()
+		if err != nil {
+			return err
+		}
+		defer ReleasePackerReversePort(packerPort)
+
+		revCtx, revCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		revTunnel, err := edgeClient.OpenPackerReverseListener(revCtx, packerPort, fmt.Sprintf("127.0.0.1:%d", packerPort))
+		revCancel()
+		if err != nil {
+			return fmt.Errorf("opening reverse Packer HTTP preseed listener on ludus-edge:%d: %w", packerPort, err)
+		}
+		defer revTunnel.Close()
+
+		proxyHost, proxyPort, splitErr := net.SplitHostPort(edgeClient.LocalProxyAddr())
+		if splitErr != nil {
+			proxyHost = "127.0.0.1"
+			proxyPort = "1080"
+		}
+		edgeNATIP := strings.TrimSpace(ServerConfiguration.EdgeNATIP)
+		if edgeNATIP == "" {
+			edgeNATIP = "192.0.2.254"
+		}
+
+		edgeVars := BuildEdgeProxyEnvVars()
+		if edgeVars == nil {
+			edgeVars = make(map[string]string)
+		}
+		edgeVars["PKR_VAR_http_bind_address"] = "127.0.0.1"
+		edgeVars["PKR_VAR_http_ip"] = edgeNATIP
+		edgeVars["PKR_VAR_http_port"] = strconv.Itoa(int(packerPort))
+		edgeVars["PKR_VAR_ssh_proxy_host"] = proxyHost
+		edgeVars["PKR_VAR_ssh_proxy_port"] = proxyPort
+		edgeEnvPrefix = FormatShellEnvExports(edgeVars)
+	}
+
+	tmplStr := `{{.EdgeEnvPrefix}}` +
+		`PACKER_PLUGIN_PATH={{.LudusInstallPath}}/resources/packer/plugins ` +
 		`PROXMOX_USERNAME='{{ .ProxmoxTokenID }}' ` +
 		`PROXMOX_TOKEN={{ .ProxmoxToken }} ` +
 		`PACKER_CONFIG_DIR={{.UsersPackerDir}} ` +
@@ -352,6 +396,7 @@ func buildVMFromTemplateWithPacker(user *models.User, packerFile string, templat
 	packerVerbose := "1"
 
 	data := struct {
+		EdgeEnvPrefix          string
 		LudusInstallPath       string
 		ProxmoxTokenID         string
 		ProxmoxToken           string
@@ -370,6 +415,7 @@ func buildVMFromTemplateWithPacker(user *models.User, packerFile string, templat
 		PackerFile             string
 		LudusNATInterface      string
 	}{
+		edgeEnvPrefix,
 		ludusInstallPath,
 		proxmoxTokenID,
 		proxmoxToken,

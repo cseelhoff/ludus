@@ -71,6 +71,26 @@ variable "ansible_home" {
 variable "ludus_nat_interface" {
   type = string
 }
+variable "http_bind_address" {
+  type    = string
+  default = ""
+}
+variable "http_ip" {
+  type    = string
+  default = ""
+}
+variable "http_port" {
+  type    = number
+  default = 0
+}
+variable "ssh_proxy_host" {
+  type    = string
+  default = ""
+}
+variable "ssh_proxy_port" {
+  type    = number
+  default = 0
+}
 ####
 
 locals {

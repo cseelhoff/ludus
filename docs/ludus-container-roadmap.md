@@ -36,40 +36,40 @@
 ### Phase 2 — Deterministic Pre-Allocated WireGuard Pool (`ludus-api/wireguard_pool.go`)
 *Goal: Run WireGuard (`:51820/udp`) natively at 1-hop wire speed on `ludus-edge` with zero runtime sync between `ludus` and `ludus-edge` and strict cryptographic key separation.*
 
-- [ ] **2.1 Deterministic HKDF X25519 Pool Generator (`ludus-api/wireguard_pool.go`):**
+- [x] **2.1 Deterministic HKDF X25519 Pool Generator (`ludus-api/wireguard_pool.go`):**
   - Implement `DeriveWireGuardSlotKey(clientPoolSeed []byte, slot int)` using `crypto/hkdf` (`SHA-256`, domain separator `"ludus-wg-pool-v1"`) + RFC 7748 Curve25519 clamping + `golang.org/x/crypto/curve25519`.
   - Implement `GenerateEdgeWireGuardBundle(endpoint string, maxSlots int)` CLI subcommand (`ludus-server --gen-wg-pool`) emitting:
-    1. `wg0.conf` for `ludus-edge` (`ServerPrivateKey` + `250` `[Peer]` public keys `198.51.100.<1..250>/32` — **zero client private keys**).
+    1. `wg0.conf` for `ludus-edge` (`ServerPrivateKey` + `2..250` `[Peer]` public keys `198.51.100.<2..250>/32` with `198.51.100.1/24` reserved for `wg0` `[Interface]` — **zero client private keys**).
     2. `wg_pool.json` for `ludus` (`ServerPublicKey`, `Endpoint`, `ClientPoolSeed`, `MaxSlots` — **zero server private key**).
-- [ ] **2.2 Wire `getWireGuardConfigForUser()` to Pool (`ludus-api/wireguard.go`):**
-  - When `wireguard_pool_file` is configured (or `container_mode: true`), derive `user.UserNumber()`'s client keypair directly in memory instead of reading `/etc/wireguard/<id>-client-private-key`.
-- [ ] **2.3 Unit Tests (`ludus-api/wireguard_pool_test.go`):**
-  - Verify deterministic key derivation, Curve25519 public-key match between `ludus`'s derived client config and `ludus-edge`'s generated `wg0.conf`, slot bounds (`1..250`), and zero secret leakage across the two artifacts.
+- [x] **2.2 Wire `getWireGuardConfigForUser()` to Pool (`ludus-api/wireguard.go`):**
+  - When `wireguard_pool_file` is configured (or `container_mode: true`), derive `user.UserNumber()`'s client keypair directly in memory instead of reading `/etc/wireguard/<id>-client-private-key`, and allocate monotonic non-recycled user slots (`AllocateMonotonicWireGuardUserSlot`).
+- [x] **2.3 Unit Tests (`ludus-api/wireguard_pool_test.go`):**
+  - Verify deterministic key derivation, Curve25519 public-key match between `ludus`'s derived client config and `ludus-edge`'s generated `wg0.conf`, slot bounds (`2..250`), monotonic slot allocation, and zero secret leakage across the two artifacts.
 
 ---
 
 ### Phase 3 — Userspace mTLS Edge Proxy, Self-Provisioning `ludus-edge` & Packer/Ansible Wiring
 *Goal: Have `ludus-server` automatically deploy/seal `ludus-edge` on Proxmox over `:8006` (`edge_auto_provision: true`) and tunnel all Ansible SSH/WinRM, custom role tools, and Packer SSH/WinRM/HTTP preseed traffic through `ludus -> ludus-edge:8444` mTLS 1.3 with zero host/LAN static routes.*
 
-- [ ] **3.1 `ludus-edge-proxy` Server & `edgeproxy` Client Package (`ludus-api/edgeproxy/` + `ludus-server/cmd/ludus-edge-proxy/`):**
+- [x] **3.1 `ludus-edge-proxy` Server & `edgeproxy` Client Package (`ludus-api/edgeproxy/` + `ludus-server/cmd/ludus-edge-proxy/`):**
   - Server (`ludus-edge-proxy` static Linux/amd64 binary for Alpine):
-    - One-time first-boot enrollment endpoint (verifying `cidata` Ed25519 enrollment signature, sealing `wg0.conf` + `edge-server` mTLS certs onto `/pool/ADMIN` private disk `0600`, and permanently locking enrollment).
+    - Zero-private-key first-boot enrollment (`ENROLL_CSR` / `ENROLL_SEAL` verifying Ed25519 signature against `ssh-ed25519` enrollment pubkey from standard Proxmox `cloud-init` `sshkeys`, generating `server.key` + `wg_server.key` locally on `/var/lib/ludus-edge` `0600`, sealing `wg0.conf` + signed `server.crt`, and permanently locking enrollment into strict mTLS 1.3).
     - TLS 1.3 listener (`RequireAndVerifyClientCert`) on `:8444`.
-    - `DIAL <ip>:<port>` handler enforcing strict `netip.Prefix` allowlist (`192.0.2.0/24` excluding `.254` non-DNS + `10.1.0.0/16..10.254.0.0/16`; hard-denies `10.0.0.0/16`, `127.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, link-local).
-    - `LISTEN <port>` reverse listener bound strictly to `192.0.2.254:<8350..8399>` for ephemeral Packer HTTP preseed callbacks, auto-closing on stream EOF.
+    - `DIAL <ip>:<port>` handler enforcing strict `netip.Prefix` allowlist (`192.0.2.0/24` excluding `.254` + `10.1.0.0/16..10.254.0.0/16`; hard-denies `10.0.0.0/16`, `127.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, link-local, hostnames).
+    - `LISTEN <port>` + `ACCEPT_JOIN` reverse listener bound strictly to `192.0.2.254:<8350..8399>` for multi-request ephemeral Packer HTTP preseed callbacks, auto-closing on stream EOF.
   - Client (`ludus-api/edgeproxy` started in-process by `ludus-server` when `edge_proxy_enabled: true`):
-    - Dual-protocol loopback listener on `127.0.0.1:1080` handling both **SOCKS5 (`CONNECT`)** and **HTTP `CONNECT`** on the same port (routing range CIDRs via `ludus-edge:8444` and bypassing `NO_PROXY` targets directly).
+    - Dual-protocol loopback listener on `127.0.0.1:1080` handling **SOCKS5 (`CONNECT`)**, **HTTP `CONNECT`** (`:5986`), and **plain HTTP forward proxying** (`:5985`) on the same port (routing range CIDRs via `ludus-edge:8444` and bypassing non-range targets directly).
     - `OpenPackerReverseListener(localPort)` helper wrapping `buildVMFromTemplateWithPacker()`.
     - Built-in `ludus-server --proxy-dial <host> <port>` subcommand so OpenSSH `ProxyCommand` needs zero external `nc`/`socat` flag discrepancies.
-- [ ] **3.2 Automatic `ludus-edge` Reconciliation via Proxmox `:8006` (`ludus-api/edge_provision.go`):**
+- [x] **3.2 Automatic `ludus-edge` Reconciliation via Proxmox `:8006` (`ludus-api/edge_provision.go`):**
   - Auto-initialize & persist mTLS PKI + 250-slot WireGuard pool in `/opt/ludus/db/edge/` when not pre-supplied.
   - Reconcile `ludus-edge` VM on Proxmox via `PVEAPIToken` (`edge_auto_provision: true`): upload secret-free `/opt/ludus/resources/ludus-edge.iso` to `fs-storage:iso/`, create/start `ludus-edge` (`256 MB` RAM, `/pool/ADMIN`, `vmbr0` + `ludusnat`, standard `cloudinit` `ipconfig0`/`ipconfig1` + enrollment pubkey, `1 GB` private seal disk on `vm-storage`), complete one-time seal over `:8444`, and verify mTLS readiness.
-- [ ] **3.3 Ansible & Packer Proxy Injection (`ludus-api/ansible.go`, `api_template_management.go`, `packer/**/*.pkr.hcl`):**
+- [x] **3.3 Ansible & Packer Proxy Injection (`ludus-api/ansible.go`, `api_template_management.go`, `packer/**/*.pkr.hcl`):**
   - When `edge_proxy_enabled: true`:
     - Inject `ProxyCommand` (`ludus-server --proxy-dial %h %p`) for range SSH hosts, `HTTP_PROXY`/`HTTPS_PROXY=http://127.0.0.1:1080` + `NO_PROXY=127.0.0.1,localhost,<proxmox_host>,10.0.20.0/24` for `pywinrm`, and optional `proxychains4` wrapper config for third-party local action modules.
     - Update Packer invocation & built-in templates (`debian12`, `debian13`, `kali`, `win2022`, `win11`) to accept optional `ssh_proxy_host` / `ssh_proxy_port`, `http_bind_address` (`127.0.0.1`), `http_ip` (`192.0.2.254`), deterministic `http_port` (`8350..8360`), and `HTTPS_PROXY`/`NO_PROXY` for `winrm` while preserving 100% stock behavior when `edge_proxy_enabled: false`.
-- [ ] **3.4 Integration Tests (`ludus-api/edgeproxy/edgeproxy_test.go`, `ludus-api/edge_provision_test.go`):**
-  - End-to-end loopback mTLS + mock Proxmox `:8006` tests verifying `ludus-edge` ISO upload + VM create + first-boot seal, idempotent fast-path skip when already healthy, SOCKS5/HTTP `CONNECT`, `10.0.20.x` SSRF rejection, and ephemeral `LISTEN` reverse HTTP preseed serving.
+- [x] **3.4 Integration Tests (`ludus-api/edgeproxy/edgeproxy_test.go`, `ludus-api/edge_provision_test.go`):**
+  - End-to-end loopback mTLS + mock Proxmox `:8006` tests verifying `ludus-edge` ISO upload + VM create + first-boot seal, idempotent fast-path skip when already healthy, SOCKS5/HTTP `CONNECT`/plain HTTP forward proxy, `10.0.20.x` SSRF rejection, and ephemeral `LISTEN` reverse HTTP preseed serving.
 
 ---
 

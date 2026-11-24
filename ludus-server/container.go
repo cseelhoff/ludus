@@ -3,14 +3,17 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	ludusapi "ludusapi"
+	"ludusapi/edgeproxy"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -167,10 +170,18 @@ func bootstrapContainerEnvironment() {
 	}
 
 	checkRemoteProxmox8or9()
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if err := ludusapi.BootstrapRemoteProxmox(ctx, &config); err != nil {
 		log.Fatalf("Proxmox startup verification/bootstrap failed: %v", err)
+	}
+	if config.EdgeAutoProvision {
+		log.Printf("Reconciling stateless ludus-edge VM (%s -> %s) on Proxmox node %s...",
+			config.EdgeVMName, config.EdgeVMIP, config.ProxmoxNode)
+		if err := ludusapi.ReconcileEdgeVMAndProxy(ctx, &config); err != nil {
+			log.Fatalf("ludus-edge self-provisioning/seal failed: %v", err)
+		}
+		log.Printf("ludus-edge (%s) verified and sealed over mTLS 1.3", config.EdgeProxyAddr)
 	}
 }
 
@@ -298,4 +309,88 @@ func runContainerSupervisor() {
 		<-adminDone
 		os.Exit(1)
 	}
+}
+
+func runGenerateWireGuardPoolCLI(outputDir string, endpoint string, maxSlots int) error {
+	bundle, err := ludusapi.GenerateEdgeWireGuardBundle(endpoint, ludusapi.DefaultWireGuardListenPort, maxSlots)
+	if err != nil {
+		return err
+	}
+	wgConfPath := filepath.Join(outputDir, "wg0.conf")
+	poolPath := filepath.Join(outputDir, "wg_pool.json")
+	if err := ludusapi.WriteWireGuardBundleFiles(wgConfPath, poolPath, bundle); err != nil {
+		return err
+	}
+	fmt.Printf("Generated ludus-edge WireGuard config: %s\nGenerated Ludus WireGuard client pool: %s\n", wgConfPath, poolPath)
+	return nil
+}
+
+func runProxyDialCLI(args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: ludus-server --proxy-dial <host> <port>")
+	}
+	target := net.JoinHostPort(strings.TrimSpace(args[0]), strings.TrimSpace(args[1]))
+
+	var cfg ludusapi.Configuration
+	cfgPath := strings.TrimSpace(os.Getenv("LUDUS_CONFIG_FILE"))
+	if cfgPath == "" {
+		cfgPath = filepath.Join(ludusInstallPath, "config.yml")
+	}
+	if raw, err := os.ReadFile(cfgPath); err == nil {
+		if err := yaml.Unmarshal(raw, &cfg); err != nil {
+			return fmt.Errorf("parsing %s: %w", cfgPath, err)
+		}
+		cfg.ApplyRemoteProxmoxDefaults()
+	}
+
+	edgeAddr := strings.TrimSpace(os.Getenv("LUDUS_EDGE_PROXY_ADDR"))
+	if edgeAddr == "" {
+		edgeAddr = strings.TrimSpace(cfg.EdgeProxyAddr)
+	}
+	caFile := strings.TrimSpace(os.Getenv("LUDUS_EDGE_PROXY_CA_FILE"))
+	if caFile == "" {
+		caFile = strings.TrimSpace(cfg.EdgeProxyCAFile)
+	}
+	certFile := strings.TrimSpace(os.Getenv("LUDUS_EDGE_PROXY_CERT_FILE"))
+	if certFile == "" {
+		certFile = strings.TrimSpace(cfg.EdgeProxyCertFile)
+	}
+	keyFile := strings.TrimSpace(os.Getenv("LUDUS_EDGE_PROXY_KEY_FILE"))
+	if keyFile == "" {
+		keyFile = strings.TrimSpace(cfg.EdgeProxyKeyFile)
+	}
+
+	client, err := edgeproxy.NewClient(edgeproxy.ClientConfig{
+		EdgeAddr: edgeAddr,
+		CAFile:   caFile,
+		CertFile: certFile,
+		KeyFile:  keyFile,
+	})
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	conn, err := client.DialRangeOrDirect(ctx, target)
+	cancel()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(conn, os.Stdin)
+		if hc, ok := conn.(interface{ CloseWrite() error }); ok {
+			_ = hc.CloseWrite()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(os.Stdout, conn)
+	}()
+	wg.Wait()
+	return nil
 }
