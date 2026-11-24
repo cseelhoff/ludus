@@ -62,8 +62,15 @@ rc-service sshd stop >/dev/null 2>&1 || true
 rc-update del sshd default >/dev/null 2>&1 || true
 pkill -x sshd >/dev/null 2>&1 || true
 
-# 1. Install offline signed APK bundle (iproute2, nftables, iptables, dnsmasq, wireguard-tools, e2fsprogs, qemu-guest-agent)
-if [ -d /opt/ludus-edge-pkgs ] && ls /opt/ludus-edge-pkgs/*.apk >/dev/null 2>&1; then
+# 1. Install offline signed APK bundle via indexed local repository
+if [ -f /opt/ludus-edge-pkgs/x86_64/APKINDEX.tar.gz ]; then
+    log "Installing offline Alpine packages from indexed local repo..."
+    apk add --no-network --force-non-repository --no-cache \
+        --repositories-file /dev/null \
+        --repository /opt/ludus-edge-pkgs \
+        --allow-untrusted \
+        iproute2 nftables iptables dnsmasq wireguard-tools openresolv e2fsprogs blkid qemu-guest-agent
+elif [ -d /opt/ludus-edge-pkgs ] && ls /opt/ludus-edge-pkgs/*.apk >/dev/null 2>&1; then
     log "Installing offline signed Alpine packages..."
     apk add --no-network --force-non-repository /opt/ludus-edge-pkgs/*.apk
 fi

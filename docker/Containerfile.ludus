@@ -64,9 +64,14 @@ RUN apk add --no-cache python3 xorriso curl ca-certificates
 WORKDIR /build
 RUN curl -fsSL -o /build/alpine-virt.iso "${ALPINE_ISO_URL}" && \
     echo "${ALPINE_ISO_SHA256}  /build/alpine-virt.iso" | sha256sum -c - && \
-    mkdir -p /build/apks && \
+    mkdir -p /build/apks/x86_64 && \
     apk update && \
-    apk fetch --recursive --output /build/apks \
+    apk fetch --recursive --output /build/apks/x86_64 \
+      alpine-base \
+      openssl \
+      libssl3 \
+      libcrypto3 \
+      openssh \
       iproute2 \
       nftables \
       iptables \
@@ -75,8 +80,8 @@ RUN curl -fsSL -o /build/alpine-virt.iso "${ALPINE_ISO_URL}" && \
       openresolv \
       e2fsprogs \
       blkid \
-      qemu-guest-agent \
-      openssh
+      qemu-guest-agent && \
+    apk index --allow-untrusted --rewrite-arch x86_64 -o /build/apks/x86_64/APKINDEX.tar.gz /build/apks/x86_64/*.apk
 
 COPY --from=go-builder /out/ludus-edge-proxy /build/ludus-edge-proxy
 COPY docker/edge-iso/ludus-edge-init.sh /build/ludus-edge-init.sh

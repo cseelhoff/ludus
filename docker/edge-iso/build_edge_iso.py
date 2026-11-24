@@ -84,8 +84,11 @@ def build_apkovl(
     """Return deterministic gzip-compressed `localhost.apkovl.tar.gz` bytes."""
     binary_bytes = edge_binary.read_bytes()
     init_bytes = init_script.read_bytes()
-    apk_files = sorted(pkgs_dir.glob("*.apk"), key=lambda p: p.name)
-    if not apk_files:
+    pkg_files = sorted(
+        (p for p in pkgs_dir.rglob("*") if p.is_file() and (p.suffix == ".apk" or p.name == "APKINDEX.tar.gz")),
+        key=lambda p: p.relative_to(pkgs_dir).as_posix(),
+    )
+    if not pkg_files:
         raise ValueError(f"No offline .apk packages found in {pkgs_dir}")
 
     raw = io.BytesIO()
@@ -99,6 +102,7 @@ def build_apkovl(
             "etc/runlevels/default",
             "opt",
             "opt/ludus-edge-pkgs",
+            "opt/ludus-edge-pkgs/x86_64",
             "usr",
             "usr/local",
             "usr/local/bin",
@@ -120,8 +124,9 @@ def build_apkovl(
                 if key_file.is_file():
                     _add_bytes(tar, f"etc/apk/keys/{key_file.name}", key_file.read_bytes(), 0o644)
 
-        for apk_file in apk_files:
-            _add_bytes(tar, f"opt/ludus-edge-pkgs/{apk_file.name}", apk_file.read_bytes(), 0o644)
+        for pkg_file in pkg_files:
+            rel = pkg_file.relative_to(pkgs_dir).as_posix()
+            _add_bytes(tar, f"opt/ludus-edge-pkgs/{rel}", pkg_file.read_bytes(), 0o644)
 
     return gzip.compress(raw.getvalue(), mtime=0)
 

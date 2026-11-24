@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -388,6 +390,17 @@ func ensureEdgeISOOnProxmox(ctx context.Context, client *ProxmoxRESTClient, cfg 
 	if isoFilename == "" || isoFilename == "." || isoFilename == "/" {
 		isoFilename = "ludus-edge.iso"
 	}
+	if FileExists(cfg.EdgeISOPath) {
+		if f, err := os.Open(cfg.EdgeISOPath); err == nil {
+			h := sha256.New()
+			if _, cErr := io.Copy(h, f); cErr == nil {
+				ext := filepath.Ext(isoFilename)
+				base := strings.TrimSuffix(isoFilename, ext)
+				isoFilename = fmt.Sprintf("%s-%s%s", base, hex.EncodeToString(h.Sum(nil))[:10], ext)
+			}
+			_ = f.Close()
+		}
+	}
 	targetVolID := fmt.Sprintf("%s:iso/%s", isoStorage, isoFilename)
 
 	var items []struct {
@@ -590,6 +603,26 @@ func ensureEdgeVMRunningOnProxmox(ctx context.Context, client *ProxmoxRESTClient
 			}
 		}
 		currentStatus = "stopped"
+	} else {
+		var vmCfg struct {
+			IDE2 string `json:"ide2"`
+		}
+		cfgPath := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(cfg.ProxmoxNode), targetVMID)
+		if err := client.Do(ctx, http.MethodGet, cfgPath, nil, &vmCfg); err == nil {
+			if vmCfg.IDE2 != "" && !strings.HasPrefix(vmCfg.IDE2, isoVolID+",") && vmCfg.IDE2 != isoVolID {
+				upd := url.Values{}
+				upd.Set("ide2", fmt.Sprintf("%s,media=cdrom", isoVolID))
+				var cfgRes interface{}
+				if err := client.Do(ctx, http.MethodPost, cfgPath, upd, &cfgRes); err == nil && currentStatus == "running" {
+					stopPath := fmt.Sprintf("/nodes/%s/qemu/%d/status/stop", url.PathEscape(cfg.ProxmoxNode), targetVMID)
+					var stopUPID string
+					if err := client.Do(ctx, http.MethodPost, stopPath, nil, &stopUPID); err == nil && strings.HasPrefix(stopUPID, "UPID:") {
+						_ = waitForProxmoxTaskREST(ctx, client, cfg.ProxmoxNode, stopUPID)
+					}
+					currentStatus = "stopped"
+				}
+			}
+		}
 	}
 
 	if currentStatus != "running" {

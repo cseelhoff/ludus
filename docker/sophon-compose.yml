@@ -9,7 +9,7 @@ x-sophon-standby: skip
 
 services:
   ludus:
-    image: registry.${SOPHON_DOMAIN:-177cpt.com}/ludus/ludus-server:${IMAGE_TAG:-2.0.0-container}
+    image: registry.${SOPHON_DOMAIN:-177cpt.com}/ludus/ludus-server:${IMAGE_TAG:-2.0.3-container}
     container_name: ludus
     restart: unless-stopped
     security_opt:
