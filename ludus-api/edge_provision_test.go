@@ -76,6 +76,10 @@ func TestReconcileEdgeVMAndProxyEndToEnd(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": items})
 
 		case r.Method == http.MethodPost && r.URL.Path == "/api2/json/nodes/pve-prod-02/storage/fs-storage/upload":
+			if r.ContentLength <= 0 || len(r.TransferEncoding) > 0 {
+				http.Error(w, "chunked transfer encoding not supported", http.StatusNotImplemented)
+				return
+			}
 			if err := r.ParseMultipartForm(4 << 20); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
@@ -218,14 +222,14 @@ func TestReconcileEdgeVMAndProxyEndToEnd(t *testing.T) {
 		t.Fatalf("expected 1 ISO upload, 1 VM create, 1 VM start; got isos=%d create=%d start=%d",
 			gotISOs, gotCreateCalls, gotStartCalls)
 	}
-	if formCopy.Get("pool") != "ADMIN" || formCopy.Get("memory") != "256" || formCopy.Get("cicustom") != "" {
-		t.Fatalf("unexpected ludus-edge VM parameters (must use ADMIN pool, 256MB RAM, zero root-only cicustom): %v", formCopy)
+	if formCopy.Get("pool") != "ADMIN" || formCopy.Get("memory") != "512" || formCopy.Get("cicustom") != "" {
+		t.Fatalf("unexpected ludus-edge VM parameters (must use ADMIN pool, 512MB RAM, zero root-only cicustom): %v", formCopy)
 	}
 	if strings.Contains(formCopy.Get("sshkeys"), "+") {
 		t.Fatalf("Proxmox sshkeys must percent-encode spaces as %%20, never '+': %q", formCopy.Get("sshkeys"))
 	}
-	if formCopy.Get("net1") != "virtio=02:1D:ED:6E:02:FE,bridge=ludusnat" {
-		t.Fatalf("expected deterministic net1 MAC on ludusnat, got %q", formCopy.Get("net1"))
+	if formCopy.Get("net1") != "virtio=02:1D:ED:6E:02:FE,bridge=ludusnat,mtu=1" {
+		t.Fatalf("expected deterministic net1 MAC + mtu=1 on ludusnat, got %q", formCopy.Get("net1"))
 	}
 	if formCopy.Get("ipconfig0") != "ip=127.0.0.1/22,gw=10.0.20.1" {
 		t.Fatalf("expected EdgeVMCIDRPrefix=22 in ipconfig0, got %q", formCopy.Get("ipconfig0"))

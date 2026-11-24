@@ -429,39 +429,37 @@ func uploadISOFileREST(ctx context.Context, client *ProxmoxRESTClient, node, sto
 	}
 	defer f.Close()
 
-	pr, pw := io.Pipe()
-	mw := multipart.NewWriter(pw)
-	contentType := mw.FormDataContentType()
+	st, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("stat %s: %w", localPath, err)
+	}
+	fileSize := st.Size()
 
-	go func() {
-		var uploadErr error
-		defer func() {
-			if uploadErr != nil {
-				_ = pw.CloseWithError(uploadErr)
-			} else {
-				_ = pw.Close()
-			}
-		}()
-		if uploadErr = mw.WriteField("content", "iso"); uploadErr != nil {
-			return
-		}
-		part, err := mw.CreateFormFile("filename", filename)
-		if err != nil {
-			uploadErr = err
-			return
-		}
-		if _, err := io.Copy(part, f); err != nil {
-			uploadErr = err
-			return
-		}
-		uploadErr = mw.Close()
-	}()
+	// Proxmox VE's pveproxy rejects chunked Transfer-Encoding (HTTP 501) on
+	// /storage/{storage}/upload. Pre-render the small multipart header/footer
+	// boundaries around the raw file reader so req.ContentLength is exact with
+	// zero full-ISO heap buffering.
+	var prefixBuf bytes.Buffer
+	mw := multipart.NewWriter(&prefixBuf)
+	contentType := mw.FormDataContentType()
+	if err := mw.WriteField("content", "iso"); err != nil {
+		return "", err
+	}
+	if _, err := mw.CreateFormFile("filename", filename); err != nil {
+		return "", err
+	}
+	var suffixBuf bytes.Buffer
+	_, _ = fmt.Fprintf(&suffixBuf, "\r\n--%s--\r\n", mw.Boundary())
+
+	bodyReader := io.MultiReader(&prefixBuf, io.LimitReader(f, fileSize), &suffixBuf)
+	totalLen := int64(prefixBuf.Len()) + fileSize + int64(suffixBuf.Len())
 
 	uploadURL := fmt.Sprintf("%s/nodes/%s/storage/%s/upload", client.BaseURL, url.PathEscape(node), url.PathEscape(storage))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, bodyReader)
 	if err != nil {
 		return "", err
 	}
+	req.ContentLength = totalLen
 	req.Header.Set("Content-Type", contentType)
 	if client.APITokenID != "" && client.APISecret != "" {
 		req.Header.Set("Authorization", fmt.Sprintf("PVEAPIToken=%s=%s", client.APITokenID, client.APISecret))
@@ -556,9 +554,9 @@ func ensureEdgeVMRunningOnProxmox(ctx context.Context, client *ProxmoxRESTClient
 		if !strings.Contains(natIP, "/") {
 			natIP += "/24"
 		}
-		net1Spec := fmt.Sprintf("virtio,bridge=%s", cfg.EffectiveLudusNATInterface())
+		net1Spec := fmt.Sprintf("virtio,bridge=%s,mtu=1", cfg.EffectiveLudusNATInterface())
 		if mac := strings.TrimSpace(cfg.EdgeNATMAC); mac != "" {
-			net1Spec = fmt.Sprintf("virtio=%s,bridge=%s", strings.ToUpper(mac), cfg.EffectiveLudusNATInterface())
+			net1Spec = fmt.Sprintf("virtio=%s,bridge=%s,mtu=1", strings.ToUpper(mac), cfg.EffectiveLudusNATInterface())
 		}
 
 		form := url.Values{}
@@ -567,7 +565,7 @@ func ensureEdgeVMRunningOnProxmox(ctx context.Context, client *ProxmoxRESTClient
 		form.Set("pool", "ADMIN")
 		form.Set("ostype", "l26")
 		form.Set("cores", "2")
-		form.Set("memory", "256")
+		form.Set("memory", "512")
 		form.Set("scsihw", "virtio-scsi-single")
 		form.Set("agent", "enabled=1")
 		form.Set("onboot", "1")
