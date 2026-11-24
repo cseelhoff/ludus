@@ -85,13 +85,13 @@ services:
       - "sophon.backup.paths=/opt/ludus/db?optional=true,/opt/ludus/users?optional=true,/opt/ludus/ranges?optional=true,/opt/ludus/sources?optional=true,/opt/ludus/blueprints?optional=true"
       - "traefik.enable=${LUDUS_PUBLISH:-true}"
       - "traefik.docker.network=proxy"
-      - "traefik.http.routers.ludus-api.entrypoints=websecure"
-      - "traefik.http.routers.ludus-api.rule=Host(`${LUDUS_API_HOSTNAME:-ludus-api}.${SOPHON_DOMAIN:-177cpt.com}`)"
-      - "traefik.http.routers.ludus-api.tls=true"
-      - "traefik.http.routers.ludus-api.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.ludus-api.tls.domains[0].main=${SOPHON_DOMAIN:-177cpt.com}"
-      - "traefik.http.routers.ludus-api.tls.domains[0].sans=*.${SOPHON_DOMAIN:-177cpt.com}"
-      - "traefik.http.services.ludus-api.loadbalancer.server.port=8080"
+      - "traefik.http.routers.ludus.entrypoints=websecure"
+      - "traefik.http.routers.ludus.rule=Host(`${LUDUS_HOSTNAME:-ludus}.${SOPHON_DOMAIN:-177cpt.com}`)"
+      - "traefik.http.routers.ludus.tls=true"
+      - "traefik.http.routers.ludus.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.ludus.tls.domains[0].main=${SOPHON_DOMAIN:-177cpt.com}"
+      - "traefik.http.routers.ludus.tls.domains[0].sans=*.${SOPHON_DOMAIN:-177cpt.com}"
+      - "traefik.http.services.ludus.loadbalancer.server.port=8080"
 
   lux:
     image: registry.${SOPHON_DOMAIN:-177cpt.com}/ludus/lux:${IMAGE_TAG:-2.0.0-container}
@@ -117,7 +117,7 @@ services:
       LUX_LOCAL_AUTH_ENABLED: "${LUX_LOCAL_AUTH_ENABLED:-true}"
       LUDUS_URL: http://ludus:8080
       LUDUS_TLS_VERIFY: "false"
-      LUX_PUBLIC_URL: "https://${LUX_HOSTNAME:-ludus}.${SOPHON_DOMAIN:-177cpt.com}"
+      LUX_PUBLIC_URL: "https://${LUX_HOSTNAME:-lux}.${SOPHON_DOMAIN:-177cpt.com}"
       LUX_OIDC_ISSUER_URL: "https://${KEYCLOAK_HOSTNAME:-auth}.${SOPHON_DOMAIN:-177cpt.com}/realms/${KEYCLOAK_REALM:-sophon}"
       LUX_OIDC_CLIENT_ID: "${LUDUS_OIDC_CLIENT_ID:-ludus}"
       LUX_OIDC_CLIENT_SECRET: "${LUDUS_OIDC_CLIENT_SECRET}"
@@ -143,13 +143,13 @@ services:
       - sophon.backup.exclude=logs/,tmp/
       - "traefik.enable=${LUDUS_PUBLISH:-true}"
       - "traefik.docker.network=proxy"
-      - "traefik.http.routers.ludus.entrypoints=websecure"
-      - "traefik.http.routers.ludus.rule=Host(`${LUX_HOSTNAME:-ludus}.${SOPHON_DOMAIN:-177cpt.com}`)"
-      - "traefik.http.routers.ludus.tls=true"
-      - "traefik.http.routers.ludus.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.ludus.tls.domains[0].main=${SOPHON_DOMAIN:-177cpt.com}"
-      - "traefik.http.routers.ludus.tls.domains[0].sans=*.${SOPHON_DOMAIN:-177cpt.com}"
-      - "traefik.http.services.ludus.loadbalancer.server.port=3000"
+      - "traefik.http.routers.lux.entrypoints=websecure"
+      - "traefik.http.routers.lux.rule=Host(`${LUX_HOSTNAME:-lux}.${SOPHON_DOMAIN:-177cpt.com}`)"
+      - "traefik.http.routers.lux.tls=true"
+      - "traefik.http.routers.lux.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.lux.tls.domains[0].main=${SOPHON_DOMAIN:-177cpt.com}"
+      - "traefik.http.routers.lux.tls.domains[0].sans=*.${SOPHON_DOMAIN:-177cpt.com}"
+      - "traefik.http.services.lux.loadbalancer.server.port=3000"
 
 networks:
   proxy:
