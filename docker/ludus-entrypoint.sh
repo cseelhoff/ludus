@@ -161,6 +161,7 @@ cfg = {
     "edge_vm_gateway": os.environ.get("LUDUS_EDGE_VM_GATEWAY", "").strip(),
     "edge_vm_bridge": os.environ.get("LUDUS_EDGE_VM_BRIDGE", "vmbr0").strip(),
     "edge_nat_ip": os.environ.get("LUDUS_EDGE_NAT_IP", "192.0.2.254").strip(),
+    "edge_nat_mac": os.environ.get("LUDUS_EDGE_NAT_MAC", "").strip(),
     "packer_http_port_min": env_int("LUDUS_PACKER_HTTP_PORT_MIN", 8350),
     "packer_http_port_max": env_int("LUDUS_PACKER_HTTP_PORT_MAX", 8360),
     "oidc_enabled": env_bool("LUDUS_OIDC_ENABLED", False),

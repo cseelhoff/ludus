@@ -542,7 +542,11 @@ func ensureEdgeVMRunningOnProxmox(ctx context.Context, client *ProxmoxRESTClient
 		}
 		mgmtIP := strings.TrimSpace(cfg.EdgeVMIP)
 		if !strings.Contains(mgmtIP, "/") {
-			mgmtIP += "/24"
+			prefix := cfg.EdgeVMCIDRPrefix
+			if prefix <= 0 {
+				prefix = 24
+			}
+			mgmtIP = fmt.Sprintf("%s/%d", mgmtIP, prefix)
 		}
 		ipconfig0 := "ip=" + mgmtIP
 		if gw := strings.TrimSpace(cfg.EdgeVMGateway); gw != "" {
@@ -551,6 +555,10 @@ func ensureEdgeVMRunningOnProxmox(ctx context.Context, client *ProxmoxRESTClient
 		natIP := strings.TrimSpace(cfg.EdgeNATIP)
 		if !strings.Contains(natIP, "/") {
 			natIP += "/24"
+		}
+		net1Spec := fmt.Sprintf("virtio,bridge=%s", cfg.EffectiveLudusNATInterface())
+		if mac := strings.TrimSpace(cfg.EdgeNATMAC); mac != "" {
+			net1Spec = fmt.Sprintf("virtio=%s,bridge=%s", strings.ToUpper(mac), cfg.EffectiveLudusNATInterface())
 		}
 
 		form := url.Values{}
@@ -568,7 +576,7 @@ func ensureEdgeVMRunningOnProxmox(ctx context.Context, client *ProxmoxRESTClient
 		form.Set("ide0", fmt.Sprintf("%s:cloudinit", vmStorage))
 		form.Set("boot", "order=ide2")
 		form.Set("net0", fmt.Sprintf("virtio,bridge=%s", cfg.EdgeVMBridge))
-		form.Set("net1", fmt.Sprintf("virtio,bridge=%s", cfg.EffectiveLudusNATInterface()))
+		form.Set("net1", net1Spec)
 		form.Set("ipconfig0", ipconfig0)
 		form.Set("ipconfig1", fmt.Sprintf("ip=%s", natIP))
 		form.Set("ciuser", "ludus-edge")

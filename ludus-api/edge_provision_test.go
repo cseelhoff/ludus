@@ -193,7 +193,9 @@ func TestReconcileEdgeVMAndProxyEndToEnd(t *testing.T) {
 		EdgeVMIP:              "127.0.0.1",
 		EdgeVMGateway:         "10.0.20.1",
 		EdgeVMBridge:          "vmbr0",
+		EdgeVMCIDRPrefix:      22,
 		EdgeNATIP:             "192.0.2.254",
+		EdgeNATMAC:            "02:1d:ed:6e:02:fe",
 		EdgeISOPath:           isoFile,
 		EdgeStateDir:          ctrlEdgeDir,
 		EdgeProxyAddr:         liveEdgeAddr,
@@ -221,6 +223,12 @@ func TestReconcileEdgeVMAndProxyEndToEnd(t *testing.T) {
 	}
 	if strings.Contains(formCopy.Get("sshkeys"), "+") {
 		t.Fatalf("Proxmox sshkeys must percent-encode spaces as %%20, never '+': %q", formCopy.Get("sshkeys"))
+	}
+	if formCopy.Get("net1") != "virtio=02:1D:ED:6E:02:FE,bridge=ludusnat" {
+		t.Fatalf("expected deterministic net1 MAC on ludusnat, got %q", formCopy.Get("net1"))
+	}
+	if formCopy.Get("ipconfig0") != "ip=127.0.0.1/22,gw=10.0.20.1" {
+		t.Fatalf("expected EdgeVMCIDRPrefix=22 in ipconfig0, got %q", formCopy.Get("ipconfig0"))
 	}
 
 	// Verify wg_pool.json was persisted and works with Phase 2 LoadWireGuardClientPool!

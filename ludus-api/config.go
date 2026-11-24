@@ -99,6 +99,7 @@ type Configuration struct {
 	EdgeProxyKeyFile       string   `mapstructure:"edge_proxy_key_file" yaml:"edge_proxy_key_file,omitempty"`
 	EdgeLocalSOCKSPort     int      `mapstructure:"edge_local_socks_port" yaml:"edge_local_socks_port,omitempty"`
 	EdgeNATIP              string   `mapstructure:"edge_nat_ip" yaml:"edge_nat_ip,omitempty"`
+	EdgeNATMAC             string   `mapstructure:"edge_nat_mac" yaml:"edge_nat_mac,omitempty"`
 	PackerHTTPPortMin      int      `mapstructure:"packer_http_port_min" yaml:"packer_http_port_min,omitempty"`
 	PackerHTTPPortMax      int      `mapstructure:"packer_http_port_max" yaml:"packer_http_port_max,omitempty"`
 	// Pre-baked WireGuard client slot pool file (250 slots derived on ludus-edge)
