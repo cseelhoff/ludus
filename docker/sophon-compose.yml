@@ -1,153 +1,162 @@
 # Sophon infravm Pure GitOps Compose stack for Ludus + LUX (Architecture A).
-# Conventions aligned with Sophon roles/gitea/templates/docker-compose.yml.j2:
-#   - Rootless Podman (1000:1000), security_opt: [no-new-privileges:true, label=disable], cap_drop: [ALL]
-#   - Single shared `proxy` external network (Traefik websecure + wildcard TLS + clean single-DNS resolution)
-#   - Images pulled from Sophon Nexus mirror: registry.${SOPHON_DOMAIN}/ludus/{ludus-server,lux}:${IMAGE_TAG}
-#   - Kopia `sophon.backup.*` labels for atomic SQLite + PocketBase + mTLS PKI backup
+# Matches ops/workloads conventions (rocketchat/compose.yaml, nextcloud/compose.yaml, adguardhome/compose.yaml):
+#   - x-sophon-standby: skip prevents standby restore drills from starting a split-brain controller against pve-prod-02
+#   - Rootless Podman (1000:1000), security_opt: [label=disable, no-new-privileges:true], cap_drop: [ALL]
+#   - Internal `backend` network for LUX -> http://ludus:8080 + external `proxy` network for Traefik websecure
+#   - Kopia v3 `sophon.backup.*` Btrfs CoW reflink paths/volumes (restorable across upgraded app image tags)
+
+x-sophon-standby: skip
 
 services:
   ludus:
-    image: registry.${SOPHON_DOMAIN}/ludus/ludus-server:${IMAGE_TAG:-latest}
+    image: registry.${SOPHON_DOMAIN:-177cpt.com}/ludus/ludus-server:${IMAGE_TAG:-2.0.0-container}
     container_name: ludus
     restart: unless-stopped
     security_opt:
-      - no-new-privileges:true
       - label=disable
+      - no-new-privileges:true
     cap_drop:
       - ALL
     environment:
-      - LUDUS_CONTAINER_MODE=true
-      - LUDUS_TLS_ENABLED=false
-      - LUDUS_PORT=8080
-      - LUDUS_ADMIN_PORT=8081
-      - LUDUS_PROXMOX_AUTH_MODE=service_token
-      - LUDUS_PROXMOX_URL=${LUDUS_PROXMOX_URL:-https://10.0.20.12:8006}
-      - LUDUS_PROXMOX_NODE=${LUDUS_PROXMOX_NODE:-pve-prod-02}
-      - LUDUS_PROXMOX_HOSTNAME=${LUDUS_PROXMOX_HOSTNAME:-pve-prod-02}
-      - LUDUS_PROXMOX_INTERFACE=${LUDUS_PROXMOX_INTERFACE:-vmbr0}
-      - LUDUS_PROXMOX_LOCAL_IP=${LUDUS_PROXMOX_LOCAL_IP:-10.0.20.12}
-      - LUDUS_PROXMOX_PUBLIC_IP=${LUDUS_PROXMOX_PUBLIC_IP:-10.0.20.12}
-      - LUDUS_PROXMOX_GATEWAY=${LUDUS_PROXMOX_GATEWAY:-10.0.20.1}
-      - LUDUS_PROXMOX_NETMASK=${LUDUS_PROXMOX_NETMASK:-255.255.255.0}
-      - LUDUS_PROXMOX_VM_STORAGE_POOL=${LUDUS_PROXMOX_VM_STORAGE_POOL:-local-lvm}
-      - LUDUS_PROXMOX_VM_STORAGE_FORMAT=${LUDUS_PROXMOX_VM_STORAGE_FORMAT:-raw}
-      - LUDUS_PROXMOX_ISO_STORAGE_POOL=${LUDUS_PROXMOX_ISO_STORAGE_POOL:-local}
-      - LUDUS_PROXMOX_INVALID_CERT=${LUDUS_PROXMOX_INVALID_CERT:-true}
-      - LUDUS_PROXMOX_API_TOKEN_ID=${LUDUS_PROXMOX_API_TOKEN_ID:-ludus-svc@pve!controller}
-      - LUDUS_PROXMOX_API_TOKEN_SECRET=${LUDUS_PROXMOX_API_TOKEN_SECRET}
-      - LUDUS_ENCRYPTION_KEY=${LUDUS_ENCRYPTION_KEY}
-      - LUDUS_EDGE_PROXY_ENABLED=true
-      - LUDUS_EDGE_AUTO_PROVISION=true
-      - LUDUS_EDGE_VM_ID=${LUDUS_EDGE_VM_ID:-999}
-      - LUDUS_EDGE_VM_NAME=${LUDUS_EDGE_VM_NAME:-ludus-edge}
-      - LUDUS_EDGE_VM_IP=${LUDUS_EDGE_VM_IP:-10.0.20.123}
-      - LUDUS_EDGE_VM_CIDR=${LUDUS_EDGE_VM_CIDR:-10.0.20.123/24}
-      - LUDUS_EDGE_VM_GATEWAY=${LUDUS_EDGE_VM_GATEWAY:-10.0.20.1}
-      - LUDUS_EDGE_VM_DNS=${LUDUS_EDGE_VM_DNS:-1.1.1.1}
-      - LUDUS_EDGE_PUBLIC_ENDPOINT=${LUDUS_EDGE_PUBLIC_ENDPOINT:-10.0.20.123}
-      - LUDUS_ADMIN_USER_ID=${LUDUS_ADMIN_USER_ID:-CA}
-      - LUDUS_ADMIN_NAME=${LUDUS_ADMIN_NAME:-Ludus Admin}
-      - LUDUS_ADMIN_EMAIL=${LUDUS_ADMIN_EMAIL}
-      - LUDUS_ADMIN_PASSWORD=${LUDUS_ADMIN_PASSWORD}
-      - LUDUS_OIDC_ENABLED=true
-      - LUDUS_OIDC_ISSUER_URL=https://${KEYCLOAK_HOSTNAME:-auth}.${SOPHON_DOMAIN}/realms/${KEYCLOAK_REALM:-sophon}
-      - LUDUS_OIDC_CLIENT_ID=${LUDUS_OIDC_CLIENT_ID:-ludus-api}
-      - LUDUS_OIDC_CLIENT_SECRET=${LUDUS_OIDC_CLIENT_SECRET}
-      - LUDUS_OIDC_DISPLAY_NAME=${LUDUS_OIDC_DISPLAY_NAME:-Sophon SSO}
-      - LUDUS_OIDC_ADMIN_GROUPS=${LUDUS_OIDC_ADMIN_GROUPS:-ludus-admins}
-      - LUDUS_OIDC_USER_GROUPS=${LUDUS_OIDC_USER_GROUPS:-ludus-users}
-      - LUDUS_SSO_REQUIRE_EXISTING_USER=${LUDUS_SSO_REQUIRE_EXISTING_USER:-false}
-      - LUDUS_LOCAL_AUTH_ENABLED=${LUDUS_LOCAL_AUTH_ENABLED:-true}
+      LUDUS_CONTAINER_MODE: "true"
+      LUDUS_TLS_ENABLED: "false"
+      LUDUS_PORT: "8080"
+      LUDUS_ADMIN_PORT: "8081"
+      LUDUS_CLUSTER_MODE: "${LUDUS_CLUSTER_MODE:-true}"
+      LUDUS_PROXMOX_PIN_TO_NODE: "${LUDUS_PROXMOX_PIN_TO_NODE:-true}"
+      LUDUS_RESERVED_RANGE_NUMBERS: "${LUDUS_RESERVED_RANGE_NUMBERS:-1}"
+      LUDUS_PROXMOX_AUTH_MODE: service_token
+      LUDUS_PROXMOX_URL: "${LUDUS_PROXMOX_URL:-https://10.0.20.12:8006}"
+      LUDUS_PROXMOX_NODE: "${LUDUS_PROXMOX_NODE:-pve-prod-02}"
+      LUDUS_PROXMOX_HOSTNAME: "${LUDUS_PROXMOX_HOSTNAME:-10.0.20.12}"
+      LUDUS_PROXMOX_INTERFACE: "${LUDUS_PROXMOX_INTERFACE:-vmbr0}"
+      LUDUS_PROXMOX_LOCAL_IP: "${LUDUS_PROXMOX_LOCAL_IP:-10.0.20.12}"
+      LUDUS_PROXMOX_PUBLIC_IP: "${LUDUS_PROXMOX_PUBLIC_IP:-10.0.20.12}"
+      LUDUS_PROXMOX_GATEWAY: "${LUDUS_PROXMOX_GATEWAY:-10.0.20.1}"
+      LUDUS_PROXMOX_NETMASK: "${LUDUS_PROXMOX_NETMASK:-255.255.255.0}"
+      LUDUS_PROXMOX_VM_STORAGE_POOL: "${LUDUS_PROXMOX_VM_STORAGE_POOL:-vm-storage}"
+      LUDUS_PROXMOX_VM_STORAGE_FORMAT: "${LUDUS_PROXMOX_VM_STORAGE_FORMAT:-raw}"
+      LUDUS_PROXMOX_ISO_STORAGE_POOL: "${LUDUS_PROXMOX_ISO_STORAGE_POOL:-fs-storage}"
+      LUDUS_PROXMOX_INVALID_CERT: "${LUDUS_PROXMOX_INVALID_CERT:-true}"
+      LUDUS_PROXMOX_API_TOKEN_ID: "${LUDUS_PROXMOX_API_TOKEN_ID:-ludus-svc@pve!controller}"
+      LUDUS_PROXMOX_API_TOKEN_SECRET: "${LUDUS_PROXMOX_API_TOKEN_SECRET}"
+      LUDUS_ENCRYPTION_KEY: "${LUDUS_ENCRYPTION_KEY}"
+      LUDUS_SDN_ZONE: "${LUDUS_SDN_ZONE:-ludus}"
+      LUDUS_NAT_INTERFACE: "${LUDUS_NAT_INTERFACE:-ludusnat}"
+      LUDUS_EDGE_PROXY_ENABLED: "true"
+      LUDUS_EDGE_AUTO_PROVISION: "true"
+      LUDUS_EDGE_VMID: "${LUDUS_EDGE_VMID:-123}"
+      LUDUS_EDGE_VM_NAME: "${LUDUS_EDGE_VM_NAME:-ludus-edge}"
+      LUDUS_EDGE_VM_IP: "${LUDUS_EDGE_VM_IP:-10.0.20.182}"
+      LUDUS_EDGE_VM_CIDR_PREFIX: "${LUDUS_EDGE_VM_CIDR_PREFIX:-24}"
+      LUDUS_EDGE_VM_GATEWAY: "${LUDUS_EDGE_VM_GATEWAY:-10.0.20.1}"
+      LUDUS_EDGE_VM_BRIDGE: "${LUDUS_EDGE_VM_BRIDGE:-vmbr0}"
+      LUDUS_EDGE_NAT_IP: "${LUDUS_EDGE_NAT_IP:-192.0.2.254}"
+      LUDUS_ADMIN_USER_ID: "${LUDUS_ADMIN_USER_ID:-CA}"
+      LUDUS_ADMIN_NAME: "${LUDUS_ADMIN_NAME:-Ludus Admin}"
+      LUDUS_ADMIN_EMAIL: "${LUDUS_ADMIN_EMAIL}"
+      LUDUS_ADMIN_PASSWORD: "${LUDUS_ADMIN_PASSWORD}"
+      LUDUS_OIDC_ENABLED: "true"
+      LUDUS_OIDC_ISSUER_URL: "https://${KEYCLOAK_HOSTNAME:-auth}.${SOPHON_DOMAIN:-177cpt.com}/realms/${KEYCLOAK_REALM:-sophon}"
+      LUDUS_OIDC_CLIENT_ID: "${LUDUS_OIDC_CLIENT_ID:-ludus}"
+      LUDUS_OIDC_CLIENT_SECRET: "${LUDUS_OIDC_CLIENT_SECRET}"
+      LUDUS_OIDC_DISPLAY_NAME: "${LUDUS_OIDC_DISPLAY_NAME:-Sophon SSO}"
+      LUDUS_OIDC_ADMIN_GROUPS: "${LUDUS_OIDC_ADMIN_GROUPS:-ludus-admins}"
+      LUDUS_OIDC_ALLOWED_GROUPS: "${LUDUS_OIDC_ALLOWED_GROUPS:-ludus-admins,ludus-users}"
+      LUDUS_SSO_REQUIRE_EXISTING_USER: "${LUDUS_SSO_REQUIRE_EXISTING_USER:-false}"
+      TZ: America/Chicago
     volumes:
       - ludus_data:/opt/ludus
     networks:
+      - backend
       - proxy
     extra_hosts:
-      - "${KEYCLOAK_HOSTNAME:-auth}.${SOPHON_DOMAIN}:${INFRAVM_IP}"
+      - "${KEYCLOAK_HOSTNAME:-auth}.${SOPHON_DOMAIN:-177cpt.com}:${INFRAVM_IP:-10.0.60.3}"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ >/dev/null || exit 1"]
-      interval: 15s
+      interval: 30s
       timeout: 5s
-      retries: 20
-      start_period: 45s
+      retries: 10
+      start_period: 120s
     labels:
-      - "sophon.backup.enable=true"
-      - "sophon.backup.group=ludus"
-      - "sophon.backup.volumes=/opt/ludus"
-      - "sophon.backup.exclude=resources/,runtimes/,ansible/,packer/,ci/"
-      - "sophon.backup.dump=exec sqlite3 /opt/ludus/db/data.db .dump"
-      - "sophon.backup.dump.name=ludus-pocketbase.sql"
-      - "traefik.enable=true"
+      - sophon.backup.enable=true
+      - sophon.backup.group=ludus
+      - "sophon.backup.paths=/opt/ludus/db?optional=true,/opt/ludus/users?optional=true,/opt/ludus/ranges?optional=true,/opt/ludus/sources?optional=true,/opt/ludus/blueprints?optional=true"
+      - "traefik.enable=${LUDUS_PUBLISH:-true}"
       - "traefik.docker.network=proxy"
       - "traefik.http.routers.ludus-api.entrypoints=websecure"
-      - "traefik.http.routers.ludus-api.rule=Host(`${LUDUS_API_HOSTNAME:-ludus-api}.${SOPHON_DOMAIN}`)"
+      - "traefik.http.routers.ludus-api.rule=Host(`${LUDUS_API_HOSTNAME:-ludus-api}.${SOPHON_DOMAIN:-177cpt.com}`)"
       - "traefik.http.routers.ludus-api.tls=true"
       - "traefik.http.routers.ludus-api.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.ludus-api.tls.domains[0].main=${SOPHON_DOMAIN}"
-      - "traefik.http.routers.ludus-api.tls.domains[0].sans=*.${SOPHON_DOMAIN}"
+      - "traefik.http.routers.ludus-api.tls.domains[0].main=${SOPHON_DOMAIN:-177cpt.com}"
+      - "traefik.http.routers.ludus-api.tls.domains[0].sans=*.${SOPHON_DOMAIN:-177cpt.com}"
       - "traefik.http.services.ludus-api.loadbalancer.server.port=8080"
 
   lux:
-    image: registry.${SOPHON_DOMAIN}/ludus/lux:${IMAGE_TAG:-latest}
+    image: registry.${SOPHON_DOMAIN:-177cpt.com}/ludus/lux:${IMAGE_TAG:-2.0.0-container}
     container_name: lux
     restart: unless-stopped
     security_opt:
-      - no-new-privileges:true
       - label=disable
+      - no-new-privileges:true
     cap_drop:
       - ALL
     depends_on:
       ludus:
         condition: service_healthy
     environment:
-      - NODE_ENV=production
-      - PORT=3000
-      - HOSTNAME=0.0.0.0
-      - DISABLE_HTTPS=true
-      - TRUST_PROXY_TLS=true
-      - DATA_DIR=/app/data
-      - APP_SECRET=${LUX_APP_SECRET}
-      - LUX_CONTAINER_MODE=true
-      - LUX_LOCAL_AUTH_ENABLED=${LUX_LOCAL_AUTH_ENABLED:-true}
-      - LUDUS_URL=http://ludus:8080
-      - LUDUS_TLS_VERIFY=false
-      - LUX_PUBLIC_URL=https://${LUX_HOSTNAME:-ludus}.${SOPHON_DOMAIN}
-      - LUX_OIDC_ISSUER_URL=https://${KEYCLOAK_HOSTNAME:-auth}.${SOPHON_DOMAIN}/realms/${KEYCLOAK_REALM:-sophon}
-      - LUX_OIDC_CLIENT_ID=${LUX_OIDC_CLIENT_ID:-lux}
-      - LUX_OIDC_CLIENT_SECRET=${LUX_OIDC_CLIENT_SECRET}
-      - LUX_OIDC_DISPLAY_NAME=${LUX_OIDC_DISPLAY_NAME:-Sophon SSO}
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      DISABLE_HTTPS: "true"
+      TRUST_PROXY_TLS: "true"
+      DATA_DIR: /app/data
+      APP_SECRET: "${LUX_APP_SECRET}"
+      LUX_CONTAINER_MODE: "true"
+      LUX_LOCAL_AUTH_ENABLED: "${LUX_LOCAL_AUTH_ENABLED:-true}"
+      LUDUS_URL: http://ludus:8080
+      LUDUS_TLS_VERIFY: "false"
+      LUX_PUBLIC_URL: "https://${LUX_HOSTNAME:-ludus}.${SOPHON_DOMAIN:-177cpt.com}"
+      LUX_OIDC_ISSUER_URL: "https://${KEYCLOAK_HOSTNAME:-auth}.${SOPHON_DOMAIN:-177cpt.com}/realms/${KEYCLOAK_REALM:-sophon}"
+      LUX_OIDC_CLIENT_ID: "${LUDUS_OIDC_CLIENT_ID:-ludus}"
+      LUX_OIDC_CLIENT_SECRET: "${LUDUS_OIDC_CLIENT_SECRET}"
+      LUX_OIDC_DISPLAY_NAME: "${LUX_OIDC_DISPLAY_NAME:-Sophon SSO}"
+      TZ: America/Chicago
     volumes:
       - lux_data:/app/data
     networks:
+      - backend
       - proxy
     extra_hosts:
-      - "${KEYCLOAK_HOSTNAME:-auth}.${SOPHON_DOMAIN}:${INFRAVM_IP}"
+      - "${KEYCLOAK_HOSTNAME:-auth}.${SOPHON_DOMAIN:-177cpt.com}:${INFRAVM_IP:-10.0.60.3}"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1"]
-      interval: 15s
+      interval: 30s
       timeout: 5s
-      retries: 20
-      start_period: 20s
+      retries: 10
+      start_period: 30s
     labels:
-      - "sophon.backup.enable=true"
-      - "sophon.backup.group=ludus"
-      - "sophon.backup.volumes=/app/data"
-      - "sophon.backup.dump=exec sqlite3 /app/data/ludus-ux.db .dump"
-      - "sophon.backup.dump.name=ludus-ux.sql"
-      - "traefik.enable=true"
+      - sophon.backup.enable=true
+      - sophon.backup.group=ludus
+      - sophon.backup.volumes=/app/data
+      - sophon.backup.exclude=logs/,tmp/
+      - "traefik.enable=${LUDUS_PUBLISH:-true}"
       - "traefik.docker.network=proxy"
-      - "traefik.http.routers.lux.entrypoints=websecure"
-      - "traefik.http.routers.lux.rule=Host(`${LUX_HOSTNAME:-ludus}.${SOPHON_DOMAIN}`)"
-      - "traefik.http.routers.lux.tls=true"
-      - "traefik.http.routers.lux.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.lux.tls.domains[0].main=${SOPHON_DOMAIN}"
-      - "traefik.http.routers.lux.tls.domains[0].sans=*.${SOPHON_DOMAIN}"
-      - "traefik.http.services.lux.loadbalancer.server.port=3000"
+      - "traefik.http.routers.ludus.entrypoints=websecure"
+      - "traefik.http.routers.ludus.rule=Host(`${LUX_HOSTNAME:-ludus}.${SOPHON_DOMAIN:-177cpt.com}`)"
+      - "traefik.http.routers.ludus.tls=true"
+      - "traefik.http.routers.ludus.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.ludus.tls.domains[0].main=${SOPHON_DOMAIN:-177cpt.com}"
+      - "traefik.http.routers.ludus.tls.domains[0].sans=*.${SOPHON_DOMAIN:-177cpt.com}"
+      - "traefik.http.services.ludus.loadbalancer.server.port=3000"
 
 networks:
   proxy:
     external: true
+  backend:
 
 volumes:
   ludus_data:
+    name: ludus_data
   lux_data:
+    name: lux_data

@@ -202,15 +202,15 @@ fi
 NAT_IP=${NAT_CIDR%/*}
 printf 'nameserver %s\n' "$UPSTREAM_DNS" > /etc/resolv.conf
 
-# 4. Enable kernel IPv4 forwarding + 254 static range routes (10.<1..254>.0.0/16 -> 192.0.2.<1..254>)
+# 4. Enable kernel IPv4 forwarding + 153 static range routes (10.<1..153>.0.0/16 -> 192.0.2.<101..253>)
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 if ip link show "$NAT_IF" >/dev/null 2>&1; then
     i=1
-    while [ "$i" -le 254 ]; do
-        ip route replace "10.${i}.0.0/16" via "192.0.2.${i}" dev "$NAT_IF" onlink || true
+    while [ "$i" -le 153 ]; do
+        ip route replace "10.${i}.0.0/16" via "192.0.2.$((100 + i))" dev "$NAT_IF" onlink || true
         i=$((i + 1))
     done
-    log "Configured 254 static range routes (10.1.0.0/16..10.254.0.0/16) on $NAT_IF"
+    log "Configured 153 static range routes (10.1.0.0/16..10.153.0.0/16 -> 192.0.2.101..253) on $NAT_IF"
 fi
 
 # 5. Load nftables NAT + strict management-LAN isolation ruleset

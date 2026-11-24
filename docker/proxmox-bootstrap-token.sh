@@ -13,9 +13,14 @@ set -euo pipefail
 ROLE_NAME="${ROLE_NAME:-LudusController}"
 SVC_USER="${SVC_USER:-ludus-svc@pve}"
 TOKEN_NAME="${TOKEN_NAME:-controller}"
+TARGET_NODE="${TARGET_NODE:-pve-prod-02}"
+VM_STORAGE="${VM_STORAGE:-vm-storage}"
+ISO_STORAGE="${ISO_STORAGE:-fs-storage}"
 SDN_ZONE="${SDN_ZONE:-ludus}"
 NAT_VNET="${NAT_VNET:-ludusnat}"
-DENY_POOLS="${DENY_POOLS:-SOC-Range}"
+DENY_POOLS="${DENY_POOLS:-SOC-Range,soc-first-proof,Internal-Infrastructure,Test-Infrastructure,Range-Infrastructure}"
+DENY_NODES="${DENY_NODES:-pve-prod-01,pve-prod-03}"
+DENY_VMS="${DENY_VMS:-10000}"
 DRY_RUN=false
 ROTATE_TOKEN=false
 
@@ -29,9 +34,14 @@ Options:
   --role <name>        Custom Proxmox role name (default: ${ROLE_NAME})
   --user <user@pve>    Service principal (default: ${SVC_USER})
   --token <name>       API token name (default: ${TOKEN_NAME})
-  --sdn-zone <zone>    Proxmox SDN Simple zone name (default: ${SDN_ZONE})
+  --node <node>        Target Proxmox node to grant VM/storage rights on (default: ${TARGET_NODE})
+  --vm-storage <pool>  Proxmox VM disk storage pool (default: ${VM_STORAGE})
+  --iso-storage <pool> Proxmox ISO storage pool (default: ${ISO_STORAGE})
+  --sdn-zone <zone>    Proxmox SDN zone name (default: ${SDN_ZONE})
   --nat-vnet <vnet>    Proxmox SDN NAT VNet name (default: ${NAT_VNET})
-  --deny-pools <csv>   Comma-separated pools to protect with NoAccess ACL (default: ${DENY_POOLS})
+  --deny-pools <csv>   Comma-separated pools to fence with NoAccess ACL (default: ${DENY_POOLS})
+  --deny-nodes <csv>   Comma-separated cluster nodes to fence with NoAccess ACL (default: ${DENY_NODES})
+  --deny-vms <csv>     Comma-separated VMIDs to fence with NoAccess ACL (default: ${DENY_VMS})
   -h, --help           Show this help
 EOF
 }
@@ -43,9 +53,14 @@ while [[ $# -gt 0 ]]; do
     --role) ROLE_NAME="$2"; shift 2 ;;
     --user) SVC_USER="$2"; shift 2 ;;
     --token) TOKEN_NAME="$2"; shift 2 ;;
+    --node) TARGET_NODE="$2"; shift 2 ;;
+    --vm-storage) VM_STORAGE="$2"; shift 2 ;;
+    --iso-storage) ISO_STORAGE="$2"; shift 2 ;;
     --sdn-zone) SDN_ZONE="$2"; shift 2 ;;
     --nat-vnet) NAT_VNET="$2"; shift 2 ;;
     --deny-pools) DENY_POOLS="$2"; shift 2 ;;
+    --deny-nodes) DENY_NODES="$2"; shift 2 ;;
+    --deny-vms) DENY_VMS="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -101,8 +116,17 @@ else
   run_cmd pveum user add "${SVC_USER}" -enable 1 -comment "Ludus unprivileged container controller service principal"
 fi
 
-echo "==> Binding ACL / -> ${SVC_USER} (${ROLE_NAME})"
-run_cmd pveum acl modify / -user "${SVC_USER}" -role "${ROLE_NAME}" -propagate 1
+echo "==> Binding least-privilege node-pinned ACLs for ${SVC_USER}"
+run_cmd pveum acl modify / -user "${SVC_USER}" -role PVEAuditor -propagate 1
+run_cmd pveum acl modify "/nodes/${TARGET_NODE}" -user "${SVC_USER}" -role "${ROLE_NAME}" -propagate 1
+run_cmd pveum acl modify /pool -user "${SVC_USER}" -role "${ROLE_NAME}" -propagate 1
+run_cmd pveum acl modify /sdn -user "${SVC_USER}" -role "${ROLE_NAME}" -propagate 1
+for st in "${VM_STORAGE}" "${ISO_STORAGE}"; do
+  [[ -z "${st}" ]] && continue
+  if [[ "${DRY_RUN}" == "true" ]] || pvesh get "/storage/${st}" >/dev/null 2>&1; then
+    run_cmd pveum acl modify "/storage/${st}" -user "${SVC_USER}" -role "${ROLE_NAME}" -propagate 1
+  fi
+done
 
 for pool_spec in "SHARED:Templates shared with all Ludus users" "ADMIN:VMs managed by the Ludus admin"; do
   pool_id="${pool_spec%%:*}"
@@ -114,6 +138,18 @@ for pool_spec in "SHARED:Templates shared with all Ludus users" "ADMIN:VMs manag
     run_cmd pvesh create /pools --poolid "${pool_id}" --comment "${pool_comment}"
   fi
 done
+
+if [[ -n "${DENY_NODES}" ]]; then
+  IFS=',' read -r -a deny_node_arr <<< "${DENY_NODES}"
+  for dnode in "${deny_node_arr[@]}"; do
+    dnode="$(printf '%s' "${dnode}" | tr -d '[:space:]')"
+    [[ -z "${dnode}" || "${dnode}" == "${TARGET_NODE}" ]] && continue
+    if [[ "${DRY_RUN}" == "true" ]] || pvesh get "/nodes/${dnode}/status" >/dev/null 2>&1; then
+      echo "==> Enforcing NoAccess blast-radius fence on /nodes/${dnode} for ${SVC_USER}"
+      run_cmd pveum acl modify "/nodes/${dnode}" -user "${SVC_USER}" -role NoAccess -propagate 1
+    fi
+  done
+fi
 
 if [[ -n "${DENY_POOLS}" ]]; then
   IFS=',' read -r -a deny_arr <<< "${DENY_POOLS}"
@@ -127,21 +163,38 @@ if [[ -n "${DENY_POOLS}" ]]; then
   done
 fi
 
-echo "==> Ensuring SDN Simple zone '${SDN_ZONE}' and VNet '${NAT_VNET}'"
+if [[ -n "${DENY_VMS}" ]]; then
+  IFS=',' read -r -a deny_vm_arr <<< "${DENY_VMS}"
+  for dvm in "${deny_vm_arr[@]}"; do
+    dvm="$(printf '%s' "${dvm}" | tr -d '[:space:]')"
+    [[ -z "${dvm}" ]] && continue
+    echo "==> Enforcing NoAccess blast-radius fence on /vms/${dvm} for ${SVC_USER}"
+    run_cmd pveum acl modify "/vms/${dvm}" -user "${SVC_USER}" -role NoAccess -propagate 1
+  done
+fi
+
+SDN_CHANGED=false
+echo "==> Ensuring SDN zone '${SDN_ZONE}' and VNet '${NAT_VNET}'"
 if [[ "${DRY_RUN}" == "false" ]] && pvesh get "/cluster/sdn/zones/${SDN_ZONE}" >/dev/null 2>&1; then
   echo "    SDN zone ${SDN_ZONE} already exists"
 else
   run_cmd pvesh create /cluster/sdn/zones --zone "${SDN_ZONE}" --type simple
+  SDN_CHANGED=true
 fi
 
 if [[ "${DRY_RUN}" == "false" ]] && pvesh get "/cluster/sdn/vnets/${NAT_VNET}" >/dev/null 2>&1; then
   echo "    SDN VNet ${NAT_VNET} already exists"
 else
   run_cmd pvesh create /cluster/sdn/vnets --vnet "${NAT_VNET}" --zone "${SDN_ZONE}" --alias "Ludus shared NAT transit VNet"
+  SDN_CHANGED=true
 fi
 
-echo "==> Applying Proxmox SDN configuration"
-run_cmd pvesh set /cluster/sdn
+if [[ "${SDN_CHANGED}" == "true" ]]; then
+  echo "==> Applying Proxmox SDN configuration"
+  run_cmd pvesh set /cluster/sdn
+else
+  echo "==> SDN zone '${SDN_ZONE}' and VNet '${NAT_VNET}' already active; skipping cluster SDN reload"
+fi
 
 FULL_TOKEN_ID="${SVC_USER}!${TOKEN_NAME}"
 TOKEN_EXISTS=false
@@ -157,16 +210,16 @@ fi
 
 if [[ "${TOKEN_EXISTS}" == "true" && "${ROTATE_TOKEN}" == "true" ]]; then
   echo "==> Rotating existing API token ${FULL_TOKEN_ID}"
-  run_cmd pveum user token remove "${SVC_USER}" "${TOKEN_NAME}"
+  run_cmd pvesh delete "/access/users/${SVC_USER}/token/${TOKEN_NAME}"
 fi
 
 echo "==> Creating non-privilege-separated service token ${FULL_TOKEN_ID}"
 if [[ "${DRY_RUN}" == "true" ]]; then
-  run_cmd pveum user token add "${SVC_USER}" "${TOKEN_NAME}" --privsep 0 --comment "Ludus container controller token" --output-format json
+  run_cmd pvesh create "/access/users/${SVC_USER}/token/${TOKEN_NAME}" --privsep 0 --comment "Ludus container controller token" --output-format json
   exit 0
 fi
 
-TOKEN_JSON="$(pveum user token add "${SVC_USER}" "${TOKEN_NAME}" --privsep 0 --comment "Ludus container controller token" --output-format json)"
+TOKEN_JSON="$(pvesh create "/access/users/${SVC_USER}/token/${TOKEN_NAME}" --privsep 0 --comment "Ludus container controller token" --output-format json)"
 TOKEN_SECRET="$(printf '%s' "${TOKEN_JSON}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
 
 cat <<EOF

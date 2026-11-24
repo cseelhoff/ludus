@@ -85,6 +85,43 @@ def read_secret(val_env, file_env):
             return fh.read().strip()
     return os.environ.get(val_env, "").strip()
 
+def write_secret_file(path, value):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(value)
+    os.chmod(path, 0o600)
+    return path
+
+secrets_dir = "/opt/ludus/db/.secrets"
+
+pve_token_file = os.environ.get("LUDUS_PROXMOX_API_TOKEN_SECRET_FILE", "").strip()
+pve_token_secret = os.environ.get("LUDUS_PROXMOX_API_TOKEN_SECRET", "").strip()
+if not pve_token_file and pve_token_secret:
+    pve_token_file = write_secret_file(os.path.join(secrets_dir, "proxmox-api-token"), pve_token_secret)
+
+oidc_secret_file = os.environ.get("LUDUS_OIDC_CLIENT_SECRET_FILE", "").strip()
+oidc_secret = os.environ.get("LUDUS_OIDC_CLIENT_SECRET", "").strip()
+if not oidc_secret_file and oidc_secret:
+    oidc_secret_file = write_secret_file(os.path.join(secrets_dir, "oidc-client-secret"), oidc_secret)
+
+db_enc_key = read_secret("LUDUS_DATABASE_ENCRYPTION_KEY", "LUDUS_DATABASE_ENCRYPTION_KEY_FILE")
+if not db_enc_key:
+    db_enc_key = read_secret("LUDUS_ENCRYPTION_KEY", "LUDUS_ENCRYPTION_KEY_FILE")
+
+reserved_raw = os.environ.get("LUDUS_RESERVED_RANGE_NUMBERS", "").strip()
+reserved_ranges = [int(x.strip()) for x in reserved_raw.split(",") if x.strip()] if reserved_raw else []
+
+allowed_groups_raw = os.environ.get("LUDUS_OIDC_ALLOWED_GROUPS", os.environ.get("LUDUS_OIDC_USER_GROUPS", "")).strip()
+allowed_groups = [g.strip() for g in allowed_groups_raw.split(",") if g.strip()]
+
+extra_aud_raw = os.environ.get("LUDUS_OIDC_EXTRA_AUDIENCES", "").strip()
+extra_audiences = [a.strip() for a in extra_aud_raw.split(",") if a.strip()]
+
+edge_cidr_raw = os.environ.get("LUDUS_EDGE_VM_CIDR_PREFIX", "").strip()
+if not edge_cidr_raw and "/" in os.environ.get("LUDUS_EDGE_VM_CIDR", ""):
+    edge_cidr_raw = os.environ["LUDUS_EDGE_VM_CIDR"].rsplit("/", 1)[-1].strip()
+edge_cidr_prefix = int(edge_cidr_raw) if edge_cidr_raw else 24
+
 cfg = {
     "container_mode": True,
     "remote_proxmox": True,
@@ -92,6 +129,11 @@ cfg = {
     "port": env_int("LUDUS_PORT", 8080),
     "admin_port": env_int("LUDUS_ADMIN_PORT", 8081),
     "expose_admin_port": env_bool("LUDUS_EXPOSE_ADMIN_PORT", False),
+    "proxmox_pin_to_node": env_bool("LUDUS_PROXMOX_PIN_TO_NODE", True),
+    "prevent_user_ansible_add": env_bool("LUDUS_PREVENT_USER_ANSIBLE_ADD", True),
+    "create_default_range": env_bool("LUDUS_CREATE_DEFAULT_RANGE", False),
+    "register_default_source": env_bool("LUDUS_REGISTER_DEFAULT_SOURCE", False),
+    "sync_sources_on_startup": env_bool("LUDUS_SYNC_SOURCES_ON_STARTUP", False),
     "proxmox_auth_mode": os.environ.get("LUDUS_PROXMOX_AUTH_MODE", "service_token"),
     "proxmox_url": os.environ["LUDUS_PROXMOX_URL"].strip(),
     "proxmox_node": os.environ.get("LUDUS_PROXMOX_NODE", "pve-prod-02").strip(),
@@ -106,32 +148,39 @@ cfg = {
     "proxmox_iso_storage_pool": os.environ.get("LUDUS_PROXMOX_ISO_STORAGE_POOL", "local").strip(),
     "proxmox_invalid_cert": env_bool("LUDUS_PROXMOX_INVALID_CERT", True),
     "proxmox_api_token_id": os.environ.get("LUDUS_PROXMOX_API_TOKEN_ID", "ludus-svc@pve!controller").strip(),
-    "proxmox_api_token_secret": read_secret("LUDUS_PROXMOX_API_TOKEN_SECRET", "LUDUS_PROXMOX_API_TOKEN_SECRET_FILE"),
-    "encryption_key": read_secret("LUDUS_ENCRYPTION_KEY", "LUDUS_ENCRYPTION_KEY_FILE"),
+    "proxmox_api_token_file": pve_token_file,
+    "database_encryption_key": db_enc_key,
     "ludus_nat_interface": os.environ.get("LUDUS_NAT_INTERFACE", "ludusnat").strip(),
-    "sdn_zone_name": os.environ.get("LUDUS_SDN_ZONE_NAME", "ludus").strip(),
-    "prevent_rfc1918_reachability": env_bool("LUDUS_PREVENT_RFC1918_REACHABILITY", True),
+    "sdn_zone": os.environ.get("LUDUS_SDN_ZONE", os.environ.get("LUDUS_SDN_ZONE_NAME", "ludus")).strip(),
     "edge_proxy_enabled": env_bool("LUDUS_EDGE_PROXY_ENABLED", True),
     "edge_auto_provision": env_bool("LUDUS_EDGE_AUTO_PROVISION", True),
-    "edge_vm_id": env_int("LUDUS_EDGE_VM_ID", 999),
+    "edge_vmid": env_int("LUDUS_EDGE_VMID", env_int("LUDUS_EDGE_VM_ID", 123)),
     "edge_vm_name": os.environ.get("LUDUS_EDGE_VM_NAME", "ludus-edge").strip(),
     "edge_vm_ip": os.environ.get("LUDUS_EDGE_VM_IP", "").strip(),
-    "edge_vm_cidr": os.environ.get("LUDUS_EDGE_VM_CIDR", "").strip(),
+    "edge_vm_cidr_prefix": edge_cidr_prefix,
     "edge_vm_gateway": os.environ.get("LUDUS_EDGE_VM_GATEWAY", "").strip(),
-    "edge_vm_dns": os.environ.get("LUDUS_EDGE_VM_DNS", "1.1.1.1").strip(),
-    "edge_public_endpoint": os.environ.get("LUDUS_EDGE_PUBLIC_ENDPOINT", "").strip(),
-    "packer_http_bind_address": os.environ.get("LUDUS_PACKER_HTTP_BIND_ADDRESS", "0.0.0.0").strip(),
-    "packer_http_address": os.environ.get("LUDUS_PACKER_HTTP_ADDRESS", "").strip(),
+    "edge_vm_bridge": os.environ.get("LUDUS_EDGE_VM_BRIDGE", "vmbr0").strip(),
+    "edge_nat_ip": os.environ.get("LUDUS_EDGE_NAT_IP", "192.0.2.254").strip(),
+    "packer_http_port_min": env_int("LUDUS_PACKER_HTTP_PORT_MIN", 8350),
+    "packer_http_port_max": env_int("LUDUS_PACKER_HTTP_PORT_MAX", 8360),
     "oidc_enabled": env_bool("LUDUS_OIDC_ENABLED", False),
     "oidc_issuer_url": os.environ.get("LUDUS_OIDC_ISSUER_URL", "").strip(),
     "oidc_client_id": os.environ.get("LUDUS_OIDC_CLIENT_ID", "").strip(),
-    "oidc_client_secret": read_secret("LUDUS_OIDC_CLIENT_SECRET", "LUDUS_OIDC_CLIENT_SECRET_FILE"),
-    "oidc_display_name": os.environ.get("LUDUS_OIDC_DISPLAY_NAME", "Keycloak SSO").strip(),
+    "oidc_client_secret_file": oidc_secret_file,
+    "oidc_skip_tls_verify": env_bool("LUDUS_OIDC_SKIP_TLS_VERIFY", False),
+    "oidc_display_name": os.environ.get("LUDUS_OIDC_DISPLAY_NAME", "Sophon SSO").strip(),
     "oidc_admin_groups": [g.strip() for g in os.environ.get("LUDUS_OIDC_ADMIN_GROUPS", "ludus-admins").split(",") if g.strip()],
-    "oidc_user_groups": [g.strip() for g in os.environ.get("LUDUS_OIDC_USER_GROUPS", "ludus-users").split(",") if g.strip()],
     "sso_require_existing_user": env_bool("LUDUS_SSO_REQUIRE_EXISTING_USER", False),
-    "local_auth_enabled": env_bool("LUDUS_LOCAL_AUTH_ENABLED", True),
 }
+
+if os.environ.get("LUDUS_CLUSTER_MODE", "").strip() != "":
+    cfg["cluster_mode"] = env_bool("LUDUS_CLUSTER_MODE", True)
+if reserved_ranges:
+    cfg["reserved_range_numbers"] = reserved_ranges
+if allowed_groups:
+    cfg["oidc_allowed_groups"] = allowed_groups
+if extra_audiences:
+    cfg["oidc_extra_audiences"] = extra_audiences
 
 # Drop empty optional strings so ApplyRemoteProxmoxDefaults fills canonical defaults.
 clean = {k: v for k, v in cfg.items() if v != ""}
