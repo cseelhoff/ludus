@@ -98,9 +98,12 @@ func userAndRangesLookupMiddleware(e *core.RequestEvent) error {
 	// By default, use the user record from the authentication token
 	userRecord := e.Auth
 
-	// If there is a userID query parameter, and the userID is different from the userID of the authenticated user,
-	// use the userID to set the user in the context if the authenticated user is an admin
+	// If there is a userID query parameter (or X-Impersonate-User header from LUX), and it differs from
+	// the authenticated user's userID, allow an admin to scope the request to that target user.
 	requestedUserID := e.Request.URL.Query().Get("userID")
+	if requestedUserID == "" {
+		requestedUserID = strings.TrimSpace(e.Request.Header.Get("X-Impersonate-User"))
+	}
 	if requestedUserID != "" && requestedUserID != e.Auth.GetString("userID") {
 		if e.Auth.GetBool("isAdmin") {
 			var err error
@@ -258,12 +261,26 @@ func isInternalProvisionRequest(e *core.RequestEvent) bool {
 	return host == "127.0.0.1" || host == "::1"
 }
 
-// Check auth for all endpoints in our base path except the console view endpoint and the internal provision request
+func isPublicAuthEndpoint(e *core.RequestEvent) bool {
+	if e.Request.URL.Path == APIBasePath+"/auth/providers" && e.Request.Method == http.MethodGet {
+		return true
+	}
+	if e.Request.URL.Path == APIBasePath+"/auth/oidc-exchange" && e.Request.Method == http.MethodPost {
+		return true
+	}
+	if e.Request.URL.Path == APIBasePath+"/auth/login" && e.Request.Method == http.MethodPost {
+		return true
+	}
+	return false
+}
+
+// Check auth for all endpoints in our base path except the console view endpoint, public OIDC auth endpoints, and the internal provision request
 // /vm/console/view is used for a WebSocket connection and requires a valid ticket
 // The JS websocket library doesn't support custom headers, so we exempt it from the auth check
 func requireAuth(e *core.RequestEvent) error {
 	if e.Auth == nil && strings.HasPrefix(e.Request.URL.Path, APIBasePath) &&
 		!strings.HasPrefix(e.Request.URL.Path, APIBasePath+"/vm/console/view") &&
+		!isPublicAuthEndpoint(e) &&
 		!isInternalProvisionRequest(e) {
 		return JSONError(e, http.StatusUnauthorized, "Authentication failed. Provide a valid API key in the X-API-KEY header or a valid JWT token in the Authorization header.")
 	}

@@ -2,6 +2,7 @@ package ludusapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"ludusapi/dto"
 	"net/http"
@@ -42,8 +43,11 @@ func getConsoleWebsocketTicket(e *core.RequestEvent) error {
 		return JSONError(e, http.StatusBadRequest, "Invalid VMID")
 	}
 
-	nodeName, err := findNodeForVM(ctx, proxmoxClient, uint64(vmid))
+	nodeName, err := authorizeAndFindNodeForVM(ctx, e, proxmoxClient, uint64(vmid), true)
 	if err != nil {
+		if errors.Is(err, errVMForbidden) {
+			return JSONError(e, http.StatusForbidden, err.Error())
+		}
 		logger.Error(fmt.Sprintf("[Websocket] Find Node Error: %v", err))
 		return JSONError(e, http.StatusNotFound, fmt.Sprintf("Could not locate VM: %v", err))
 	}

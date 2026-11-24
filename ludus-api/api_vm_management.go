@@ -2,6 +2,7 @@ package ludusapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -32,6 +33,13 @@ func DestroyVM(e *core.RequestEvent) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+
+	if _, authErr := authorizeAndFindNodeForVM(ctx, e, proxmoxClient, uint64(vmID), false); authErr != nil {
+		if errors.Is(authErr, errVMForbidden) {
+			return JSONError(e, http.StatusForbidden, authErr.Error())
+		}
+		return JSONError(e, http.StatusNotFound, "Unable to locate VM: "+authErr.Error())
+	}
 
 	err = destroyVM(ctx, proxmoxClient, vmID)
 	if err != nil {

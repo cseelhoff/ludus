@@ -109,6 +109,8 @@ type Configuration struct {
 	OIDCIssuerURL        string   `mapstructure:"oidc_issuer_url" yaml:"oidc_issuer_url,omitempty"`
 	OIDCClientID         string   `mapstructure:"oidc_client_id" yaml:"oidc_client_id,omitempty"`
 	OIDCClientSecretFile string   `mapstructure:"oidc_client_secret_file" yaml:"oidc_client_secret_file,omitempty"`
+	OIDCSkipTLSVerify    bool     `mapstructure:"oidc_skip_tls_verify" yaml:"oidc_skip_tls_verify,omitempty"`
+	OIDCExtraAudiences   []string `mapstructure:"oidc_extra_audiences" yaml:"oidc_extra_audiences,omitempty"`
 	OIDCAllowedGroups    []string `mapstructure:"oidc_allowed_groups" yaml:"oidc_allowed_groups,omitempty"`
 	OIDCAdminGroups      []string `mapstructure:"oidc_admin_groups" yaml:"oidc_admin_groups,omitempty"`
 	// Quota defaults - applied to users who don't have explicit quotas or group defaults
@@ -402,6 +404,10 @@ func (c *Configuration) ApplyRemoteProxmoxDefaults() {
 	}
 	if strings.TrimSpace(c.EdgeProxyKeyFile) == "" && c.EdgeAutoProvision {
 		c.EdgeProxyKeyFile = filepath.Join(c.EdgeStateDir, "client.key")
+	}
+	c.OIDCIssuerURL = strings.TrimRight(strings.TrimSpace(c.OIDCIssuerURL), "/")
+	if c.OIDCEnabled && strings.TrimSpace(c.OIDCDisplayName) == "" {
+		c.OIDCDisplayName = "SSO"
 	}
 }
 

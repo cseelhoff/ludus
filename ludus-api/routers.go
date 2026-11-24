@@ -365,6 +365,41 @@ var routes = PocketBaseRoutes{
 	},
 
 	{
+		"GetAuthProviders",
+		http.MethodGet,
+		"/auth/providers",
+		GetAuthProviders,
+	},
+
+	{
+		"ExchangeOIDCToken",
+		http.MethodPost,
+		"/auth/oidc-exchange",
+		ExchangeOIDCToken,
+	},
+
+	{
+		"LocalPasswordLogin",
+		http.MethodPost,
+		"/auth/login",
+		LocalPasswordLogin,
+	},
+
+	{
+		"AdminImpersonateToken",
+		http.MethodPost,
+		"/auth/impersonate",
+		AdminImpersonateToken,
+	},
+
+	{
+		"GetAuthenticatedUserMe",
+		http.MethodGet,
+		"/auth/me",
+		GetAuthenticatedUserMe,
+	},
+
+	{
 		"GetLicense",
 		http.MethodGet,
 		"/license",

@@ -76,19 +76,19 @@
 ### Phase 4 — Declarative Keycloak OIDC + Local Auth REST Contract (`ludus-api` + `ludus-ux` Fork)
 *Goal: Eliminate SSH and Proxmox auth from the UI path; connect LUX <-> Ludus purely over HTTPS/HTTP REST with Sophon Keycloak OIDC primary auth and PocketBase local auth fallback.*
 
-- [ ] **4.1 Declarative OIDC Provider & Group RBAC in `ludus-api` (`ludus-api/oidc_bootstrap.go`, `database.go`):**
+- [x] **4.1 Declarative OIDC Provider & Group RBAC in `ludus-api` (`ludus-api/oidc_bootstrap.go`, `database.go`):**
   - Reconcile PocketBase `users` collection `oauth2` OIDC provider (`oidc_issuer_url`, `oidc_client_id`, secret from `oidc_client_secret_file`) automatically on `ludus-admin` startup.
   - Decode/verify Keycloak group claims (`groups` / `roles`) during OAuth2 login: enforce `oidc_allowed_groups` (when non-empty), auto-provision new users when `sso_require_existing_user: false`, and sync `isAdmin` dynamically from `oidc_admin_groups`.
-- [ ] **4.2 Server-to-Server OIDC Token Exchange & Session Introspection (`ludus-api/api_auth.go`):**
-  - Add `POST /api/v2/auth/oidc-exchange` (validates a Keycloak OIDC access/ID token against configured `oidc_issuer_url` JWKS, provisions/loads the matching Ludus user, and returns a PocketBase JWT + user profile `{userID, email, name, isAdmin}`) alongside native `POST /api/collections/users/auth-with-password` local fallback and `GET /api/v2/auth/me`.
-- [ ] **4.3 SSH-Free `cseelhoff/ludus-ux` Fork (`lux` Container):**
-  - Fork `ryokubaka/ludus-ux` to `cseelhoff/ludus-ux`.
-  - Replace `auth-ssh.ts` (`ssh2` + `.bashrc` scraping) and `lux-host` with:
-    1. Keycloak OIDC Authorization Code + PKCE login (`POST /api/v2/auth/oidc-exchange` -> Ludus JWT).
-    2. Local Ludus email/password fallback (`POST /api/collections/users/auth-with-password` -> Ludus JWT).
-  - Route all LUX backend proxy requests to `LUDUS_INTERNAL_URL` (`http://ludus:8080`) with `Authorization: Bearer <jwt>` and remove Docker socket / SSH host-key requirements.
-- [ ] **4.4 Auth Unit Tests (`ludus-api/oidc_bootstrap_test.go`):**
-  - Mock OIDC discovery + JWKS server testing login, group allowlist rejection, `ludus-admins` -> `isAdmin: true` promotion, auto-provisioning, and local password fallback.
+- [x] **4.2 Server-to-Server OIDC Token Exchange & Session Introspection (`ludus-api/api_auth.go`):**
+  - Add `POST /api/v2/auth/oidc-exchange` (validates a Keycloak OIDC access/ID token against configured `oidc_issuer_url` JWKS, provisions/loads the matching Ludus user, and returns a PocketBase JWT + user profile `{userID, email, name, isAdmin}`), `POST /api/v2/auth/login` (SSH-free local password login), `POST /api/v2/auth/impersonate` (admin impersonation JWT minting), `GET /api/v2/auth/providers`, and `GET /api/v2/auth/me`.
+- [x] **4.3 SSH-Free `cseelhoff/ludus-ux` Fork (`lux` Container):**
+  - Branch `feat/container-oidc-rest` in `/home/caleb/ludus-ux` (fork of `ryokubaka/ludus-ux`).
+  - Replace `auth-ssh.ts` (`ssh2` + `.bashrc` scraping) and `lux-host` in container mode with:
+    1. Keycloak OIDC Authorization Code + PKCE login (`/api/auth/oidc/{login,callback}` -> `POST /api/v2/auth/oidc-exchange` -> Ludus JWT).
+    2. Local Ludus email/userID/password fallback (`POST /api/v2/auth/login` -> Ludus JWT).
+  - Route all LUX backend proxy requests to `LUDUS_URL` (`http://ludus:8080`) with `Authorization: Bearer <jwt>`, support `X-Impersonate-User` + `POST /api/v2/auth/impersonate`, route noVNC via RBAC-checked `/api/v2/vm/console/ticket` + `/api/v2/vm/console/view`, and support rootless non-root container execution.
+- [x] **4.4 Auth Unit Tests (`ludus-api/oidc_bootstrap_test.go`, `ludus-ux/src/lib/auth/oidc-pkce.test.ts`, `ludus-ux/src/lib/ludus/ludus-auth-headers.test.ts`):**
+  - Mock OIDC discovery + JWKS server testing login, group allowlist rejection, `ludus-admins` -> `isAdmin: true` promotion, auto-provisioning, local password login, admin impersonation, `X-Impersonate-User` + `service_token` VM RBAC, S256 PKCE + AES-GCM state cookies, and LUX security audit suites.
 
 ---
 

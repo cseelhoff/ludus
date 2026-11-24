@@ -828,6 +828,8 @@ func getAllVMs(e *core.RequestEvent, ctx context.Context, client *goproxmox.Clie
 	return allVMs, nil
 }
 
+var errVMForbidden = errors.New("user does not have access to this VM")
+
 func findNodeForVM(ctx context.Context, client *goproxmox.Client, vmid uint64) (string, error) {
 	cluster, err := client.Cluster(ctx)
 	if err != nil {
@@ -846,6 +848,62 @@ func findNodeForVM(ctx context.Context, client *goproxmox.Client, vmid uint64) (
 	}
 
 	return "", fmt.Errorf("VMID %d not found in cluster", vmid)
+}
+
+func authorizeAndFindNodeForVM(ctx context.Context, e *core.RequestEvent, client *goproxmox.Client, vmid uint64, allowShared bool) (string, error) {
+	cluster, err := client.Cluster(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	resources, err := cluster.Resources(ctx, "vm")
+	if err != nil {
+		return "", err
+	}
+
+	var matched *goproxmox.ClusterResource
+	for _, res := range resources {
+		if res.VMID == vmid {
+			matched = res
+			break
+		}
+	}
+	if matched == nil {
+		return "", fmt.Errorf("VMID %d not found in cluster", vmid)
+	}
+
+	if e == nil || e.Get("user") == nil {
+		return matched.Node, nil
+	}
+	user, ok := e.Get("user").(*models.User)
+	if !ok || user.IsAdmin() {
+		return matched.Node, nil
+	}
+
+	if strings.HasPrefix(matched.Pool, "RANGE_") {
+		rangeID := strings.TrimPrefix(matched.Pool, "RANGE_")
+		rangeNumber, rangeErr := GetRangeNumberFromRangeID(rangeID)
+		if rangeErr == nil && HasRangeAccess(e, user.UserId(), rangeNumber) {
+			return matched.Node, nil
+		}
+		return "", errVMForbidden
+	}
+
+	if allowShared && matched.Pool == "SHARED" {
+		return matched.Node, nil
+	}
+
+	if e.App != nil {
+		vmRec, vmErr := e.App.FindFirstRecordByFilter("vms", "proxmoxID = {:vmid}", map[string]any{"vmid": int(vmid)})
+		if vmErr == nil && vmRec != nil {
+			rangeRec, rangeErr := e.App.FindRecordById("ranges", vmRec.GetString("range"))
+			if rangeErr == nil && rangeRec != nil && HasRangeAccess(e, user.UserId(), rangeRec.GetInt("rangeNumber")) {
+				return matched.Node, nil
+			}
+		}
+	}
+
+	return "", errVMForbidden
 }
 
 func getNodeForVMByName(e *core.RequestEvent, vmName string) (string, error) {

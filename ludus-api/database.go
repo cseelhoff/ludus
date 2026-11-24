@@ -2,6 +2,7 @@ package ludusapi
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"database/sql"
 	"encoding/json"
@@ -65,6 +66,16 @@ func InitDb() {
 				logger.Error(fmt.Sprintf("SQLite migration failed: %v", err))
 				os.Exit(2)
 			}
+		}
+		if ServerConfiguration.OIDCEnabled {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			oidcErr := ReconcileDeclarativeOIDCProvider(ctx, app, &ServerConfiguration)
+			cancel()
+			if oidcErr != nil {
+				logger.Error(fmt.Sprintf("Declarative OIDC provider bootstrap failed: %v", oidcErr))
+				os.Exit(2)
+			}
+			logger.Info(fmt.Sprintf("Configured declarative OIDC provider (%s)", ServerConfiguration.OIDCIssuerURL))
 		}
 	}
 }
@@ -547,13 +558,29 @@ const ssoExistingUserRequiredMessage = "SSO requires an existing Ludus account w
 
 func populateUserFieldsFromOAuth2Provider(e *core.RecordAuthWithOAuth2RequestEvent) error {
 	ConfigMu.RLock()
-	requireExistingUser := ServerConfiguration.SSORequireExistingUser
+	cfg := ServerConfiguration
 	ConfigMu.RUnlock()
-	if requireExistingUser && (e.Record == nil || e.OAuth2User == nil || e.OAuth2User.Email == "" || e.Record.Email() != e.OAuth2User.Email) {
+
+	var rawClaims map[string]any
+	if e.OAuth2User != nil {
+		rawClaims = e.OAuth2User.RawUser
+	}
+	allowed, wantIsAdmin, _ := EvaluateOIDCGroupAccess(rawClaims, cfg.OIDCAllowedGroups, cfg.OIDCAdminGroups)
+	if !allowed {
+		return e.ForbiddenError(errOIDCGroupForbidden.Error(), nil)
+	}
+
+	if cfg.SSORequireExistingUser && (e.Record == nil || e.OAuth2User == nil || e.OAuth2User.Email == "" || e.Record.Email() != e.OAuth2User.Email) {
 		return e.ForbiddenError(ssoExistingUserRequiredMessage, nil)
 	}
 
 	if e.Record != nil {
+		if len(cfg.OIDCAdminGroups) > 0 && e.Record.GetBool("isAdmin") != wantIsAdmin {
+			e.Record.Set("isAdmin", wantIsAdmin)
+			if err := e.App.Save(e.Record); err != nil {
+				return fmt.Errorf("synchronizing OAuth2 isAdmin status: %w", err)
+			}
+		}
 		return e.Next()
 	}
 
@@ -572,24 +599,14 @@ func populateUserFieldsFromOAuth2Provider(e *core.RecordAuthWithOAuth2RequestEve
 
 	userID := generateUserIDFromOAuth2Provider(e)
 	password := security.RandomString(15)
-	proxmoxUsername := strings.ReplaceAll(strings.ToLower(name), " ", "-")
+	proxmoxUsername := generateUniqueProxmoxUsername(e.App, name)
 
-	matchingUsers, err := e.App.CountRecords("users", dbx.HashExp{"proxmoxUsername": proxmoxUsername})
-	if err != nil {
-		return fmt.Errorf("checking if proxmox username exists: %w", err)
-	}
-	if matchingUsers > 0 {
-		return fmt.Errorf("user with proxmox username %s already exists", proxmoxUsername)
-	}
-	if userExistsOnHostSystem(proxmoxUsername) {
-		return fmt.Errorf("username %s already exists on the host system", proxmoxUsername)
-	}
 	if poolExists(userID) {
 		return fmt.Errorf("pool %s already exists", userID)
 	}
 
 	// Running as non-root: proxy the provisioning request to the root API
-	isAdmin := false
+	isAdmin := wantIsAdmin
 	tokenPayload := fmt.Sprintf("%s|%s|%d", userID, strconv.FormatBool(isAdmin), time.Now().Unix())
 	encryptedToken, err := EncryptStringForDatabase(tokenPayload)
 	if err != nil {
