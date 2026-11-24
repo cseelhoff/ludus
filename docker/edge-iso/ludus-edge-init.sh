@@ -57,11 +57,21 @@ find_iface_by_mac_or_name() {
     printf '%s' "$want_name"
 }
 
+# 0. Enforce zero-SSH appliance posture (Alpine tiny-cloud auto-starts sshd when sshkeys exist)
+rc-service sshd stop >/dev/null 2>&1 || true
+rc-update del sshd default >/dev/null 2>&1 || true
+pkill -x sshd >/dev/null 2>&1 || true
+
 # 1. Install offline signed APK bundle (iproute2, nftables, iptables, dnsmasq, wireguard-tools, e2fsprogs, qemu-guest-agent)
 if [ -d /opt/ludus-edge-pkgs ] && ls /opt/ludus-edge-pkgs/*.apk >/dev/null 2>&1; then
     log "Installing offline signed Alpine packages..."
-    apk add --no-network /opt/ludus-edge-pkgs/*.apk
+    apk add --no-network --force-non-repository /opt/ludus-edge-pkgs/*.apk
 fi
+
+for kmod in virtio_scsi virtio_blk ext4 tun wireguard nf_tables nft_masq nft_nat nft_chain_nat nf_conntrack; do
+    modprobe "$kmod" >/dev/null 2>&1 || true
+done
+mdev -s >/dev/null 2>&1 || true
 
 # 2. Mount persistent 1 GB seal disk (/dev/sda or /dev/vda) at /var/lib/ludus-edge (0700)
 mkdir -p /var/lib/ludus-edge
@@ -76,7 +86,7 @@ for candidate in /dev/disk/by-label/LUDUS_EDGE_STATE /dev/sda /dev/vda; do
 done
 
 if [ -n "$STATE_DEV" ]; then
-    if ! blkid "$STATE_DEV" >/dev/null 2>&1; then
+    if ! blkid "$STATE_DEV" 2>/dev/null | grep -q 'TYPE="ext4"'; then
         log "Formatting blank seal disk $STATE_DEV as ext4 (LUDUS_EDGE_STATE)..."
         mkfs.ext4 -q -F -L LUDUS_EDGE_STATE "$STATE_DEV"
     fi
@@ -222,6 +232,7 @@ table inet ludus_edge {
         type filter hook input priority 0; policy accept;
         iifname "lo" accept
         ct state established,related accept
+        tcp dport 22 drop
         # Prevent range VMs on ludusnat from reaching mTLS control port (:8444)
         iifname "${NAT_IF}" tcp dport 8444 drop
     }
@@ -234,14 +245,19 @@ table inet ludus_edge {
         # Hairpin / inter-router transit on ludusnat when permitted by range router rules
         iifname "${NAT_IF}" oifname "${NAT_IF}" accept
         # Block range VMs from initiating connections to RFC1918 management LANs on MGMT_IF
-        iifname "${NAT_IF}" oifname "${MGMT_IF}" ip daddr { 10.0.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } drop
+        iifname "${NAT_IF}" oifname "${MGMT_IF}" ip daddr 10.0.0.0/16 drop
+        iifname "${NAT_IF}" oifname "${MGMT_IF}" ip daddr 172.16.0.0/12 drop
+        iifname "${NAT_IF}" oifname "${MGMT_IF}" ip daddr 192.168.0.0/16 drop
+        iifname "${NAT_IF}" oifname "${MGMT_IF}" ip daddr 169.254.0.0/16 drop
         # Allow range VMs / Packer template builds outbound internet access via NAT
         iifname "${NAT_IF}" oifname "${MGMT_IF}" accept
     }
 
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-        oifname "${MGMT_IF}" ip saddr { 192.0.2.0/24, 198.51.100.0/24, 10.0.0.0/8 } masquerade
+        oifname "${MGMT_IF}" ip saddr 192.0.2.0/24 masquerade
+        oifname "${MGMT_IF}" ip saddr 198.51.100.0/24 masquerade
+        oifname "${MGMT_IF}" ip saddr 10.0.0.0/8 masquerade
         oifname "${NAT_IF}" ip saddr 198.51.100.0/24 masquerade
     }
 }
@@ -287,17 +303,16 @@ if [ -s /var/lib/ludus-edge/wg0.conf ]; then
     log "Restored sealed WireGuard interface wg0 (:51820/udp)"
 fi
 
-# 9. Start ludus-edge-proxy under OpenRC supervise-daemon
+# 9. Start ludus-edge-proxy with automatic 2s respawn supervisor
 log "Starting ludus-edge-proxy on 0.0.0.0:8444 (nat-bind-ip=${NAT_IP})..."
-supervise-daemon ludus-edge-proxy \
-    --start \
-    --respawn-delay 2 \
-    --respawn-max 0 \
-    --stdout /var/log/ludus-edge-proxy.log \
-    --stderr /var/log/ludus-edge-proxy.log \
-    -- /usr/local/bin/ludus-edge-proxy \
-        --listen 0.0.0.0:8444 \
-        --state-dir /var/lib/ludus-edge \
-        --enroll-pubkey-file /var/lib/ludus-edge/enroll.pub \
-        --nat-bind-ip "${NAT_IP}"
+(
+    while true; do
+        /usr/local/bin/ludus-edge-proxy \
+            --listen 0.0.0.0:8444 \
+            --state-dir /var/lib/ludus-edge \
+            --enroll-pubkey-file /var/lib/ludus-edge/enroll.pub \
+            --nat-bind-ip "${NAT_IP}" >>/var/log/ludus-edge-proxy.log 2>&1 || true
+        sleep 2
+    done
+) </dev/null >/dev/null 2>&1 &
 log "ludus-edge boot reconciliation complete."
