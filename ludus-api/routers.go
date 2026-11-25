@@ -1171,4 +1171,33 @@ var routes = PocketBaseRoutes{
 		"/ansible/role/scope",
 		MoveRoleScope,
 	},
+
+	// SSH-free LUX container-mode Proxmox resource endpoints
+	{
+		"GetProxmoxHostResources",
+		http.MethodGet,
+		"/proxmox/host-resources",
+		GetProxmoxHostResources,
+	},
+
+	{
+		"GetProxmoxTemplateGuests",
+		http.MethodGet,
+		"/proxmox/template-guests",
+		GetProxmoxTemplateGuests,
+	},
+
+	{
+		"GetProxmoxSharedAdminVMs",
+		http.MethodGet,
+		"/proxmox/shared-vms",
+		GetProxmoxSharedAdminVMs,
+	},
+
+	{
+		"PutProxmoxSharedAdminVMPower",
+		http.MethodPut,
+		"/proxmox/shared-vms/{vmid}/power",
+		PutProxmoxSharedAdminVMPower,
+	},
 }

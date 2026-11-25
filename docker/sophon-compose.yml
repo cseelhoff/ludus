@@ -7,9 +7,40 @@
 
 x-sophon-standby: skip
 
+x-sophon-oidc:
+  client_id: ludus
+  name: Ludus Cyber Range
+  secret_env: LUDUS_OIDC_CLIENT_SECRET
+  groups:
+    - ludus-admins
+    - ludus-users
+  redirect_uris:
+    - https://${LUX_HOSTNAME:-lux}.${SOPHON_DOMAIN:-177cpt.com}/api/auth/oidc/callback
+    - https://${LUDUS_HOSTNAME:-ludus}.${SOPHON_DOMAIN:-177cpt.com}/sso/callback
+    - https://${LUDUS_HOSTNAME:-ludus}.${SOPHON_DOMAIN:-177cpt.com}/api/oauth2-redirect
+    - http://localhost:19876/callback
+    - http://127.0.0.1:19876/callback
+  web_origins:
+    - https://${LUX_HOSTNAME:-lux}.${SOPHON_DOMAIN:-177cpt.com}
+    - https://${LUDUS_HOSTNAME:-ludus}.${SOPHON_DOMAIN:-177cpt.com}
+
+x-sophon-secrets:
+  LUDUS_ENCRYPTION_KEY:
+    format: hex
+    bytes: 16
+  LUX_APP_SECRET:
+    format: hex
+    bytes: 32
+  LUDUS_ADMIN_PASSWORD:
+    format: alnum
+    length: 32
+
+x-sophon-external-secrets:
+  - LUDUS_PROXMOX_API_TOKEN_SECRET
+
 services:
   ludus:
-    image: registry.${SOPHON_DOMAIN:-177cpt.com}/ludus/ludus-server:${IMAGE_TAG:-2.0.3-container}
+    image: registry.${SOPHON_DOMAIN:-177cpt.com}/ludus/ludus-server:${IMAGE_TAG:-2.0.4-container}
     container_name: ludus
     restart: unless-stopped
     security_opt:
@@ -94,7 +125,7 @@ services:
       - "traefik.http.services.ludus.loadbalancer.server.port=8080"
 
   lux:
-    image: registry.${SOPHON_DOMAIN:-177cpt.com}/ludus/lux:${IMAGE_TAG:-2.0.0-container}
+    image: registry.${SOPHON_DOMAIN:-177cpt.com}/ludus/lux:${IMAGE_TAG:-2.0.4-container}
     container_name: lux
     restart: unless-stopped
     security_opt:

@@ -49,9 +49,15 @@ Create a single confidential OpenID Connect client **`ludus`** in the Sophon Key
 - **Client authentication**: `On` (confidential)
 - **Standard flow**: `On` (`PKCE Code Challenge Method`: `S256`)
 - **Valid redirect URIs**:
-  - `https://ludus.<domain>/api/auth/oidc/callback`
-  - `https://ludus-api.<domain>/api/oauth2-redirect`
+  - `https://lux.<domain>/api/auth/oidc/callback`
+  - `https://ludus.<domain>/sso/callback`
+  - `https://ludus.<domain>/api/oauth2-redirect`
+  - `http://localhost:19876/callback`
+  - `http://127.0.0.1:19876/callback`
+- **Valid post logout redirect URIs**:
+  - `+`
 - **Web origins**:
+  - `https://lux.<domain>`
   - `https://ludus.<domain>`
 - **Client Scopes / Group Mapper**:
   - Attach the `groups` scope (or a `Group Membership` mapper with **Token Claim Name** = `groups`, Full group path `Off`, included in **ID token**, **Access token**, and **UserInfo**).
